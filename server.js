@@ -26,14 +26,37 @@ const path = require('path');
     path.join(__dirname, 'seed-inicial.sqlite'),
   ];
   const seed = candidatos.find((p) => fs.existsSync(p));
+  if (!seed) return;
   try {
-    if (!fs.existsSync(alvo) && seed) {
+    let precisaImportar = false;
+    if (!fs.existsSync(alvo)) {
+      // Volume totalmente vazio (primeira subida de verdade).
+      precisaImportar = true;
+    } else {
+      // Já existe um banco no Volume. Mas se ele estiver VAZIO (0 conversas),
+      // foi criado por um deploy anterior SEM histórico — nesse caso importa
+      // o seed por cima. Se tiver conversas de verdade, NÃO mexe (nunca
+      // sobrescreve dado real).
+      try {
+        const { DatabaseSync } = require('node:sqlite');
+        const atualDb = new DatabaseSync(alvo);
+        const temLeads = atualDb.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name='leads'").get().n;
+        const nLeads = temLeads ? atualDb.prepare('SELECT COUNT(*) n FROM leads').get().n : 0;
+        atualDb.close();
+        if (nLeads === 0) precisaImportar = true;
+      } catch (e) {
+        // Se não deu pra ler o banco atual, não arrisca sobrescrever.
+      }
+    }
+    if (precisaImportar) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
       fs.copyFileSync(seed, alvo);
-      console.log(`>> Histórico inicial importado de ${path.basename(seed)} para o Volume (primeira subida).`);
+      console.log(`>> Histórico importado de ${path.basename(seed)} para o Volume (banco estava vazio).`);
+    } else {
+      console.log('>> Banco do Volume já tem conversas — seed ignorado (não sobrescreve).');
     }
   } catch (e) {
-    console.error('>> Falha ao importar o seed inicial:', e.message);
+    console.error('>> Falha ao importar o seed:', e.message);
   }
 })();
 
