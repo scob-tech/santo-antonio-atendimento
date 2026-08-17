@@ -14,14 +14,23 @@ const path = require('path');
 // removido do projeto.
 (() => {
   const fs = require('fs');
+  const setor = (process.env.SETOR || 'vendas').toLowerCase();
   const DATA_DIR = process.env.DATA_DIR || __dirname;
   const alvo = path.join(DATA_DIR, 'data.sqlite');
-  const seed = path.join(__dirname, 'seed-inicial.sqlite');
+  // Procura primeiro o seed DESTE setor (assim um único repositório pode
+  // guardar os três: seed-vendas.sqlite, seed-financeiro.sqlite,
+  // seed-expedicao.sqlite — cada projeto importa só o seu, pelo SETOR).
+  // Se não achar, tenta um "seed-inicial.sqlite" genérico.
+  const candidatos = [
+    path.join(__dirname, `seed-${setor}.sqlite`),
+    path.join(__dirname, 'seed-inicial.sqlite'),
+  ];
+  const seed = candidatos.find((p) => fs.existsSync(p));
   try {
-    if (!fs.existsSync(alvo) && fs.existsSync(seed)) {
+    if (!fs.existsSync(alvo) && seed) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
       fs.copyFileSync(seed, alvo);
-      console.log('>> Histórico inicial importado de seed-inicial.sqlite para o Volume (primeira subida).');
+      console.log(`>> Histórico inicial importado de ${path.basename(seed)} para o Volume (primeira subida).`);
     }
   } catch (e) {
     console.error('>> Falha ao importar o seed inicial:', e.message);
