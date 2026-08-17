@@ -93,6 +93,13 @@ app.use(express.static(path.join(__dirname, 'public'), {
   },
 }));
 
+// Favicon (o ícone da aba do navegador) — alguns navegadores pedem
+// /favicon.ico direto; servimos o logo do Santo Antônio pra não aparecer o
+// "planeta cinza" padrão.
+app.get('/favicon.ico', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'img', 'icon-192.png'));
+});
+
 // ---------------------------------------------------------------
 // MIDDLEWARES DE AUTENTICAÇÃO
 // ---------------------------------------------------------------
@@ -212,6 +219,13 @@ app.post('/api/me/senha', requireAuth, (req, res) => {
 // com qualquer chamada antiga do frontend — devolve sempre esse setor.
 app.get('/api/setores', requireAuth, (req, res) => {
   res.json([db.getSetorPorSlug(SETOR)]);
+});
+
+// Público (sem login): diz qual setor este sistema atende — usado pela tela
+// de login pra mostrar "Central de Atendimento — Vendas / Financeiro".
+app.get('/api/setor-atual', (req, res) => {
+  const s = db.getSetorPorSlug(SETOR);
+  res.json({ slug: SETOR, nome: s ? s.nome : SETOR });
 });
 
 // Serve os arquivos de mídia guardados no Volume (fotos, documentos, áudios,

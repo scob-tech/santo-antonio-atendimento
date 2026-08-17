@@ -420,6 +420,10 @@ function renderizarUserBox() {
     if (painelCustom) painelCustom.style.display = 'block';
     const btnArmaz = document.getElementById('btn-armazenamento');
     if (btnArmaz) btnArmaz.style.display = 'inline-block';
+    // Card "Ferramentas do administrador" na tela de Configurações (histórico,
+    // armazenamento, backup) — sai da tela de início pra não poluir.
+    const cardFerr = document.getElementById('config-ferramentas');
+    if (cardFerr) cardFerr.style.display = 'block';
   }
   if (usuarioAtual.role !== 'supervisor') {
     document.getElementById('btn-relatorio').style.display = 'inline-block';
@@ -1299,13 +1303,20 @@ function renderizarMidia(m) {
   const url = urlMidiaSegura(m.midia_url);
   if (!url) return '';
   if (m.midia_tipo === 'imagem') {
-    return `<a href="${url}" target="_blank" rel="noopener"><img src="${url}" style="max-width:100%; border-radius:8px; margin-bottom:6px; display:block;" /></a>`;
+    // Miniatura enxuta na conversa; clica pra abrir ampliado no lightbox.
+    return `<img class="midia-amp" data-midia-url="${url}" data-midia-tipo="imagem" src="${url}" style="max-width:200px; max-height:200px; border-radius:8px; margin-bottom:6px; display:block; cursor:zoom-in;" />`;
   }
   if (m.midia_tipo === 'audio') {
     return `<audio controls src="${url}" style="max-width:220px; margin-bottom:6px; display:block;"></audio>`;
   }
   if (m.midia_tipo === 'video') {
-    return `<video controls src="${url}" style="max-width:100%; border-radius:8px; margin-bottom:6px; display:block;"></video>`;
+    // Vídeo em miniatura (toca ali mesmo com os controles); a lupa abre ampliado.
+    return `<div style="position:relative; display:inline-block; margin-bottom:6px; max-width:220px;">`
+      + `<video controls src="${url}" style="max-width:220px; max-height:220px; border-radius:8px; display:block;"></video>`
+      + `<button type="button" class="midia-amp" data-midia-url="${url}" data-midia-tipo="video" title="Ampliar" `
+      + `style="position:absolute; top:6px; right:6px; border:none; background:rgba(0,0,0,.55); color:#fff; `
+      + `width:28px; height:28px; border-radius:6px; cursor:zoom-in; font-size:14px; line-height:1; padding:0;">⛶</button>`
+      + `</div>`;
   }
   if (m.midia_tipo === 'documento') {
     const nome = m.midia_nome || 'documento';
@@ -1316,6 +1327,41 @@ function renderizarMidia(m) {
   }
   return '';
 }
+
+// Lightbox: abre foto/vídeo em tamanho grande sobre a tela. A URL já vem
+// escapada por urlMidiaSegura, então é seguro jogar no src aqui.
+function abrirMidiaAmpliada(url, tipo) {
+  let overlay = document.getElementById('midia-lightbox');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'midia-lightbox';
+    overlay.style.cssText = 'position:fixed; inset:0; z-index:9999; background:rgba(0,0,0,.85); '
+      + 'display:flex; align-items:center; justify-content:center; padding:24px; cursor:zoom-out;';
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) fecharMidiaAmpliada(); });
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') fecharMidiaAmpliada(); });
+  }
+  const conteudo = tipo === 'video'
+    ? `<video controls autoplay src="${url}" style="max-width:92vw; max-height:88vh; border-radius:10px; display:block;"></video>`
+    : `<img src="${url}" style="max-width:92vw; max-height:88vh; border-radius:10px; display:block;" />`;
+  overlay.innerHTML = `<button type="button" id="midia-lightbox-fechar" title="Fechar" `
+    + `style="position:absolute; top:16px; right:20px; border:none; background:rgba(255,255,255,.15); color:#fff; `
+    + `width:40px; height:40px; border-radius:50%; cursor:pointer; font-size:22px; line-height:1;">×</button>` + conteudo;
+  overlay.style.display = 'flex';
+  const btnFechar = document.getElementById('midia-lightbox-fechar');
+  if (btnFechar) btnFechar.addEventListener('click', fecharMidiaAmpliada);
+}
+function fecharMidiaAmpliada() {
+  const overlay = document.getElementById('midia-lightbox');
+  if (overlay) { overlay.innerHTML = ''; overlay.style.display = 'none'; }
+}
+// Um único listener delegado cobre todas as miniaturas (fotos e a lupa do vídeo).
+document.addEventListener('click', (e) => {
+  const alvo = e.target.closest('.midia-amp');
+  if (!alvo) return;
+  e.preventDefault();
+  abrirMidiaAmpliada(alvo.getAttribute('data-midia-url'), alvo.getAttribute('data-midia-tipo'));
+});
 
 // O prefixo "*Nome:*" que a gente manda pro WhatsApp (Financeiro/Expedição/
 // grupo) usa a formatação de negrito do próprio WhatsApp (asterisco).

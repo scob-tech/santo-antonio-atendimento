@@ -933,9 +933,6 @@ body.tema-escuro .btn-ghost { background: var(--card); color: var(--text); }
               <div class="admin-actions" id="painel-acoes-admin">
                 <button class="btn-primary btn-small" id="btn-relatorio" onclick="abrirRelatorio()" style="display:none;">📊 Relatório Diário</button>
                 <button class="btn-ghost btn-small" id="btn-rodar-analise" onclick="rodarAnaliseDiariaAgora()" style="display:none;">🤖 Gerar Análise</button>
-                <button class="btn-ghost btn-small" id="btn-historico-relatorios" onclick="abrirHistoricoRelatorios()" style="display:none;">📚 Histórico de Relatórios</button>
-                <button class="btn-ghost btn-small" id="btn-armazenamento" onclick="abrirArmazenamento()" style="display:none;">🗜️ Armazenamento</button>
-                <button class="btn-ghost btn-small" id="btn-backup" onclick="baixarBackup()">💾 Baixar backup</button>
               </div>
               <div id="painel-analise-custom" style="display:none; margin-top:16px; max-width:600px;">
                 <label style="display:block; font-size:12px; font-weight:700; color:var(--muted); margin-bottom:6px;">
@@ -945,7 +942,6 @@ body.tema-escuro .btn-ghost { background: var(--card); color: var(--text); }
                   style="width:100%; box-sizing:border-box; padding:10px 12px; border:1px solid var(--border); border-radius:10px; font-family:'Inter',sans-serif; font-size:13px; resize:vertical; background:var(--card); color:var(--text);"></textarea>
                 <div style="display:flex; gap:10px; align-items:center; margin-top:8px; flex-wrap:wrap;">
                   <button class="btn-primary btn-small" id="btn-analise-custom" onclick="rodarAnalisePersonalizada()">🔎 Analisar</button>
-                  <button class="btn-ghost btn-small" id="btn-historico-analises" onclick="abrirHistoricoAnalises()">📚 Histórico de análises</button>
                   <span style="font-size:11.5px; color:var(--muted);">Ex.: "quanto de desconto os vendedores estão dando" · "quais objeções mais aparecem"</span>
                 </div>
               </div>
@@ -1135,6 +1131,17 @@ body.tema-escuro .btn-ghost { background: var(--card); color: var(--text); }
               <input type="password" id="senha-nova-config" placeholder="Nova senha" style="margin-bottom:8px;" />
               <div class="msg" id="senha-config-msg"></div>
               <button class="btn-primary btn-small" style="width:100%;" onclick="salvarSenhaConfig()">Salvar senha</button>
+            </div>
+
+            <div class="card config-card" id="config-ferramentas" style="display:none;">
+              <h3>Ferramentas do administrador</h3>
+              <p>Relatórios, análises e manutenção do sistema.</p>
+              <div style="display:flex; flex-direction:column; gap:8px;">
+                <button class="btn-ghost btn-small" id="btn-historico-relatorios" onclick="abrirHistoricoRelatorios()" style="display:none;">📚 Histórico de Relatórios</button>
+                <button class="btn-ghost btn-small" id="btn-historico-analises" onclick="abrirHistoricoAnalises()">📚 Histórico de análises</button>
+                <button class="btn-ghost btn-small" id="btn-armazenamento" onclick="abrirArmazenamento()" style="display:none;">🗜️ Armazenamento</button>
+                <button class="btn-ghost btn-small" id="btn-backup" onclick="baixarBackup()">💾 Baixar backup</button>
+              </div>
             </div>
 
             <div class="card config-card" id="config-cadastros"></div>
@@ -1518,6 +1525,6 @@ body.tema-escuro .btn-ghost { background: var(--card); color: var(--text); }
     </div>
   </div>
 
-<script src="app.js?v=20260814single"></script>
+<script src="app.js?v=20260817midia"></script>
 </body>
 </html>

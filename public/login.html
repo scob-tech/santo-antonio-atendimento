@@ -91,38 +91,41 @@
 <body>
   <div class="login-box">
     <div class="logo-mark"><img src="/img/logo.png" alt="Depósito Santo Antônio" /></div>
-    <h1>Central de Atendimento</h1>
+    <h1 id="titulo-central">Central de Atendimento</h1>
     <div class="erro" id="erro"></div>
     <form id="form-login">
       <label for="login">Login</label>
       <input type="text" id="login" autocomplete="username" required />
       <label for="senha">Senha</label>
       <input type="password" id="senha" autocomplete="current-password" required />
-      <label for="setor">Setor</label>
-      <select id="setor" required>
-        <option value="" disabled selected>Selecione o setor</option>
-        <option value="vendas">Vendas</option>
-        <option value="financeiro">Financeiro</option>
-        <option value="expedicao">Expedição</option>
-        <option value="administrador">Administrador</option>
-      </select>
       <button type="submit">Entrar</button>
     </form>
   </div>
 
 <script>
+  // Mostra o setor deste sistema no título (Vendas / Financeiro), já que os
+  // dois têm o mesmo logo — assim a equipe sabe em qual sistema está entrando.
+  (async () => {
+    try {
+      const r = await fetch('/api/setor-atual');
+      if (r.ok) {
+        const s = await r.json();
+        if (s && s.nome) document.getElementById('titulo-central').textContent = 'Central de Atendimento — ' + s.nome;
+      }
+    } catch (e) { /* mantém o título padrão */ }
+  })();
+
   document.getElementById('form-login').addEventListener('submit', async (e) => {
     e.preventDefault();
     const login = document.getElementById('login').value.trim();
     const senha = document.getElementById('senha').value;
-    const setor = document.getElementById('setor').value;
     const erroEl = document.getElementById('erro');
     erroEl.style.display = 'none';
 
     const res = await fetch('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ login, senha, setor }),
+      body: JSON.stringify({ login, senha }),
     });
 
     if (res.ok) {
