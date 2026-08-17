@@ -45,6 +45,7 @@ const claudeIA = require('./claude');
 const push = require('./push');
 const agendador = require('./agendador');
 const backup = require('./backup');
+const midia = require('./midia');
 
 // EDIÇÃO DE SETOR ÚNICO: este sistema inteiro atende UM setor só, fixado
 // pela variável de ambiente SETOR (vendas | financeiro | expedicao). Tudo
@@ -188,6 +189,15 @@ app.post('/api/me/senha', requireAuth, (req, res) => {
 // com qualquer chamada antiga do frontend — devolve sempre esse setor.
 app.get('/api/setores', requireAuth, (req, res) => {
   res.json([db.getSetorPorSlug(SETOR)]);
+});
+
+// Serve os arquivos de mídia guardados no Volume (fotos, documentos, áudios,
+// vídeos). Exige login — como é a mesma origem, o cookie de sessão vai junto
+// automaticamente no <img src> / <a href>, então funciona pra exibir e baixar.
+app.get('/midia/:arquivo', requireAuth, (req, res) => {
+  const caminho = midia.caminhoDoArquivo(req.params.arquivo);
+  if (!caminho) return res.status(404).json({ erro: 'mídia não encontrada' });
+  res.sendFile(caminho);
 });
 
 // ---------------------------------------------------------------
@@ -364,6 +374,13 @@ function truncar(texto, tamanho = 100) {
 
 async function processarMensagemRecebida({ telefone, nome_cliente, texto, origem, midia_url, midia_tipo, setor = 'vendas', isGrupo = false, zapiMessageId = null, zapiReferenceMessageId = null }) {
   const setorObj = db.getSetorPorSlug(setor) || db.getSetorPorSlug('vendas');
+
+  // Mídia que chega do cliente vem como LINK da Z-API (que pode expirar).
+  // Baixamos pro Volume na hora e guardamos como arquivo permanente — assim
+  // a foto/documento não some depois. Se o download falhar, mantém o link.
+  if (midia_url) {
+    midia_url = await midia.salvarDeUrl(midia_url, { tipo: midia_tipo });
+  }
 
   // Normaliza só telefone de conversa individual — o "telefone" de um
   // grupo é na verdade o ID do grupo (tem letras/traço), não um número
@@ -586,8 +603,9 @@ async function processarWebhookMensagem(req, res) {
           if (ecoRecente) {
             return res.status(200).json({ info: 'eco recente idêntico já registrado, ignorado' });
           }
+          const refManual = midiaUrl ? await midia.salvarDeUrl(midiaUrl, { tipo: midiaTipo }) : null;
           db.prepare(`INSERT INTO mensagens (lead_id, remetente, texto, midia_url, midia_tipo) VALUES (?, 'vendedor', ?, ?, ?)`)
-            .run(leadAtivo.id, texto, midiaUrl || null, midiaTipo || null);
+            .run(leadAtivo.id, texto, refManual, midiaTipo || null);
           // Responder manualmente já "puxa" a conversa pra atendimento —
           // alguém da equipe claramente já está cuidando dela.
           if (leadAtivo.status === 'novo') {
@@ -1073,8 +1091,12 @@ app.post('/api/leads/:id/mensagens', requireAuth, async (req, res) => {
     if (msgOriginal) respondeAValido = msgOriginal.id;
   }
 
+  // Guarda a mídia como ARQUIVO no Volume (não base64 no banco). O base64
+  // original (midia_base64) continua em memória só pra mandar pra Z-API logo
+  // abaixo; no banco fica só a referência curta "/midia/...".
+  const refMidia = midia_base64 ? midia.salvarDataUri(midia_base64, { tipo: midia_tipo, nome: midia_nome }) : null;
   const info = db.prepare(`INSERT INTO mensagens (lead_id, remetente, texto, midia_url, midia_tipo, midia_nome, responde_a) VALUES (?, 'vendedor', ?, ?, ?, ?, ?)`)
-    .run(req.params.id, textoFinal, midia_base64 || null, midia_tipo || null, midia_nome || null, respondeAValido);
+    .run(req.params.id, textoFinal, refMidia, midia_tipo || null, midia_nome || null, respondeAValido);
 
   // Se está respondendo a uma mensagem específica, pega o ID dela lá na
   // Z-API — é isso que faz o WhatsApp do cliente mostrar a citação de
@@ -1215,8 +1237,11 @@ app.post('/api/mensagens/:id/encaminhar', requireAuth, async (req, res) => {
   const info = db.prepare(`INSERT INTO mensagens (lead_id, remetente, texto, midia_url, midia_tipo, midia_nome) VALUES (?, 'vendedor', ?, ?, ?, ?)`)
     .run(destino.id, textoSalvo, origem.midia_url || null, origem.midia_tipo || null, origem.midia_nome || null);
 
+  // Pra reenviar pela Z-API, a mídia precisa do conteúdo — se estiver salva
+  // como arquivo local ("/midia/..."), lê de volta como data URI.
+  const midiaParaEnviar = temMidia ? midia.refParaDataUri(origem.midia_url, { tipo: origem.midia_tipo }) : null;
   const envio = temMidia
-    ? await zapi.enviarMidiaWhatsapp(destino.telefone, origem.midia_tipo, origem.midia_url, origem.midia_nome, textoParaEnviar, null, null)
+    ? await zapi.enviarMidiaWhatsapp(destino.telefone, origem.midia_tipo, midiaParaEnviar, origem.midia_nome, textoParaEnviar, null, null)
     : await zapi.enviarMensagemWhatsapp(destino.telefone, textoParaEnviar, null, null);
 
   if (envio.messageId) {
@@ -1922,23 +1947,32 @@ app.get('/api/admin/armazenamento', requireAuth, requireAdmin, (req, res) => {
   const pageSize = db.prepare('PRAGMA page_size').get().page_size || 0;
   const bancoBytes = pageCount * pageSize;
 
-  const midia = db.prepare(`SELECT midia_tipo AS tipo, LENGTH(midia_url) AS tam FROM mensagens WHERE midia_url LIKE 'data:%'`).all();
-  let midiaBytes = 0;
+  // Agora a mídia é ARQUIVO no Volume — medimos a pasta /midia direto no disco.
+  const fs = require('fs');
+  let midiaBytes = 0, midiaQtd = 0;
   const porTipo = {};
-  for (const m of midia) { midiaBytes += m.tam; porTipo[m.tipo || 'outro'] = (porTipo[m.tipo || 'outro'] || 0) + m.tam; }
-
-  const fotosGrandes = db.prepare(`
-    SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(midia_url)),0) AS soma FROM mensagens
-    WHERE midia_url LIKE 'data:image/jp%' AND LENGTH(midia_url) > ? AND midia_compactada = 0
-  `).get(LIMITE_FOTO_GRANDE);
+  const extParaTipo = { jpg:'imagem', jpeg:'imagem', png:'imagem', gif:'imagem', webp:'imagem',
+    ogg:'audio', mp3:'audio', m4a:'audio', amr:'audio', mp4:'video', pdf:'documento' };
+  try {
+    if (fs.existsSync(midia.MIDIA_DIR)) {
+      for (const f of fs.readdirSync(midia.MIDIA_DIR)) {
+        const st = fs.statSync(require('path').join(midia.MIDIA_DIR, f));
+        if (!st.isFile()) continue;
+        midiaBytes += st.size; midiaQtd++;
+        const ext = (f.split('.').pop() || '').toLowerCase();
+        const tipo = extParaTipo[ext] || 'outro';
+        porTipo[tipo] = (porTipo[tipo] || 0) + st.size;
+      }
+    }
+  } catch (e) { /* pasta ainda não existe: fica zerado */ }
 
   res.json({
     banco_bytes: bancoBytes,
     midia_bytes: midiaBytes,
-    midia_qtd: midia.length,
+    midia_qtd: midiaQtd,
     por_tipo: porTipo,
-    fotos_grandes_qtd: fotosGrandes.n,
-    fotos_grandes_bytes: fotosGrandes.soma,
+    fotos_grandes_qtd: 0,        // não há mais base64 pra compactar
+    fotos_grandes_bytes: 0,
   });
 });
 

@@ -112,7 +112,45 @@ try {
   abortar(`Erro durante a migração (nada foi salvo na cópia): ${err.message}`);
 }
 
-// Compacta o arquivo (recupera o espaço das conversas removidas).
+// -------- 3b) MÍDIA COMO ARQUIVO: tira o base64 de dentro do banco --------
+// Cada mídia que estava embutida em base64 vira um arquivo numa pasta ao lado
+// do banco, e o banco passa a guardar só a referência "/midia/...". É isso que
+// deixa o banco pequeno e rápido. A pasta de mídia vai junto pro Volume do
+// setor na hora de subir.
+const midiaDir = saida.replace(/\.sqlite$/i, '') + '-midia';
+if (!fs.existsSync(midiaDir)) fs.mkdirSync(midiaDir, { recursive: true });
+const crypto = require('crypto');
+const extPorMime = { 'image/jpeg':'jpg','image/jpg':'jpg','image/png':'png','image/gif':'gif','image/webp':'webp','audio/ogg':'ogg','audio/mpeg':'mp3','audio/mp4':'m4a','video/mp4':'mp4','application/pdf':'pdf' };
+const extPorTipo = { imagem:'jpg', audio:'ogg', video:'mp4', documento:'pdf', sticker:'webp' };
+function extrair(dataUri, tipo, nome) {
+  const m = String(dataUri).match(/^data:([^;,]*)?(;base64)?,(.*)$/s);
+  if (!m) return null;
+  const mime = (m[1] || '').toLowerCase();
+  const buf = m[2] ? Buffer.from(m[3], 'base64') : Buffer.from(decodeURIComponent(m[3]));
+  let ext = extPorMime[mime];
+  if (!ext && nome && nome.includes('.')) ext = nome.split('.').pop().toLowerCase().replace(/[^a-z0-9]/g,'').slice(0,5);
+  if (!ext) ext = extPorTipo[tipo] || 'bin';
+  const arq = `${Date.now().toString(36)}-${crypto.randomBytes(8).toString('hex')}.${ext}`;
+  fs.writeFileSync(path.join(midiaDir, arq), buf);
+  return '/midia/' + arq;
+}
+const comMidiaBase64 = db.prepare(`SELECT id, midia_url, midia_tipo, midia_nome FROM mensagens WHERE midia_url LIKE 'data:%'`).all();
+let extraidas = 0;
+const updRef = db.prepare(`UPDATE mensagens SET midia_url = ? WHERE id = ?`);
+db.exec('BEGIN');
+try {
+  for (const row of comMidiaBase64) {
+    const ref = extrair(row.midia_url, row.midia_tipo, row.midia_nome);
+    if (ref) { updRef.run(ref, row.id); extraidas++; }
+  }
+  db.exec('COMMIT');
+} catch (err) {
+  db.exec('ROLLBACK');
+  abortar(`Erro ao extrair mídia pra arquivo: ${err.message}`);
+}
+console.log(`✓ Mídia extraída pra arquivo: ${extraidas} de ${comMidiaBase64.length} (pasta: ${path.basename(midiaDir)})`);
+
+// Compacta o arquivo (recupera o espaço das conversas removidas E do base64).
 db.exec('VACUUM');
 
 // -------- 4) CONFERE as contagens (segurança contra perda) --------
@@ -136,9 +174,18 @@ const okMsgs = depois.mensagens === contarOrigem.mensagens;
 const okContatos = depois.contatos === contarOrigem.contatos;
 const semForasteiros = depois.leadsForaDoSetor === 0;
 
+function mb(bytes) { return (bytes / (1024 * 1024)).toFixed(1) + ' MB'; }
+const tamBanco = fs.existsSync(saida) ? fs.statSync(saida).size : 0;
+let tamMidia = 0, arquivosMidia = 0;
+if (fs.existsSync(midiaDir)) {
+  for (const f of fs.readdirSync(midiaDir)) { tamMidia += fs.statSync(path.join(midiaDir, f)).size; arquivosMidia++; }
+}
+
 if (okLeads && okMsgs && okContatos && semForasteiros) {
   console.log('✅ CONFERÊNCIA OK — nenhuma conversa deste setor foi perdida, e nenhuma de outro setor sobrou.');
-  console.log(`   Arquivo pronto: ${path.resolve(saida)}\n`);
+  console.log(`   Banco (enxuto):  ${path.resolve(saida)}  (${mb(tamBanco)})`);
+  console.log(`   Pasta de mídia:  ${path.resolve(midiaDir)}  (${arquivosMidia} arquivos, ${mb(tamMidia)})`);
+  console.log('   → o banco vai como seed; a pasta de mídia vai pro /midia do Volume desse setor.\n');
   process.exit(0);
 } else {
   console.error('⚠️  CONFERÊNCIA FALHOU — as contagens não bateram:');
