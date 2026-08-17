@@ -1,0 +1,21 @@
+{
+  "name": "santo-antonio-ia",
+  "version": "0.1.0",
+  "description": "Sistema de IA para atendimento via WhatsApp - MVP local (sem WhatsApp real ainda)",
+  "main": "server.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "simulate": "node scripts/simulate-message.js",
+    "simulate-demo": "node scripts/simulate-demo.js"
+  },
+  "dependencies": {
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "express": "^4.22.2",
+    "web-push": "^3.6.7"
+  }
+}
