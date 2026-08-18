@@ -394,13 +394,14 @@ app.delete('/api/vendedores/:id', requireAuth, requireAdmin, (req, res) => {
 // o resultado. Envia a boas-vindas automática de volta pro WhatsApp de
 // verdade quando a Z-API estiver configurada (enviarMensagemWhatsapp vira
 // no-op silencioso se não estiver — ver zapi.js).
-// Interruptor da mensagem automática de boas-vindas. Desliga só isso —
-// o resto do sistema (fila, conversa, envio manual do vendedor) continua
-// 100% normal. Pra desligar: variável BOAS_VINDAS_AUTOMATICA=false no Railway.
-// Sem a variável (ou qualquer outro valor), fica ligado por padrão.
-const BOAS_VINDAS_ATIVA = process.env.BOAS_VINDAS_AUTOMATICA !== 'false';
+// Interruptor da mensagem automática de boas-vindas. Hoje a IA é usada só
+// pros relatórios e curadoria — NÃO responde cliente. Por isso a boas-vindas
+// automática vem DESLIGADA por padrão: o cliente novo só recebe resposta do
+// vendedor (envio manual). O resto do sistema (fila, conversa) segue 100%.
+// Se um dia quiser religar: variável BOAS_VINDAS_AUTOMATICA=true no Railway.
+const BOAS_VINDAS_ATIVA = process.env.BOAS_VINDAS_AUTOMATICA === 'true';
 if (!BOAS_VINDAS_ATIVA) {
-  console.log('>> Mensagem automática de boas-vindas DESLIGADA (BOAS_VINDAS_AUTOMATICA=false) — só envio manual do vendedor está ativo.');
+  console.log('>> Mensagem automática de boas-vindas DESLIGADA (padrão) — a IA cuida só de relatórios/curadoria, não responde cliente.');
 }
 
 // Corpo da notificação não pode ser um romance — trunca mantendo legível.
