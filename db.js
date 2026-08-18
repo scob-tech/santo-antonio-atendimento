@@ -301,6 +301,17 @@ if (!colunaExiste('leads', 'is_grupo')) {
   db.exec(`ALTER TABLE leads ADD COLUMN is_grupo INTEGER NOT NULL DEFAULT 0`);
 }
 
+// CURADORIA DE QUALIDADE: além do texto humano (conteudo), guardamos o bloco
+// de métricas por vendedor em JSON estruturado numa coluna própria, pra o
+// dashboard externo ler direto sem precisar garimpar texto. Vale tanto pras
+// análises (analises_personalizadas) quanto pro relatório diário do Financeiro.
+if (!colunaExiste('analises_personalizadas', 'metricas_json')) {
+  db.exec(`ALTER TABLE analises_personalizadas ADD COLUMN metricas_json TEXT`);
+}
+if (!colunaExiste('relatorios_financeiro', 'metricas_json')) {
+  db.exec(`ALTER TABLE relatorios_financeiro ADD COLUMN metricas_json TEXT`);
+}
+
 // ---------------------------------------------------------------
 // ÍNDICES — sem eles, cada consulta "mensagens de um lead" varria a tabela
 // mensagens INTEIRA (que é enorme por causa das mídias em base64). Como a

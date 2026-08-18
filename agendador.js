@@ -24,6 +24,48 @@ const claudeIA = require('./claude');
 
 let ultimaExecucaoData = null;
 
+// Monta as conversas com atividade HOJE de um setor, já com o nome do
+// atendente responsável em cada lead (lead.vendedor_nome), respeitando um
+// orçamento de caracteres pra não estourar token num setor com muito volume.
+// Usado pela curadoria de qualidade diária (relatório por vendedor).
+function montarConversasDoDia(setorId) {
+  const LIMITE_CONVERSAS = 60;
+  const LIMITE_MENSAGENS = 40;
+  const MAX_CHARS_MSG = 400;
+  const ORCAMENTO_CHARS = 45000;
+
+  const leads = db.prepare(`
+    SELECT leads.*, MAX(mensagens.criado_em) AS ultima_msg
+    FROM leads
+    JOIN mensagens ON mensagens.lead_id = leads.id
+    WHERE leads.setor_id = ? AND date(mensagens.criado_em) = date('now')
+    GROUP BY leads.id
+    ORDER BY ultima_msg DESC
+    LIMIT ?
+  `).all(setorId, LIMITE_CONVERSAS);
+  if (leads.length === 0) return [];
+
+  const vendMap = {};
+  db.prepare('SELECT id, nome FROM vendedores').all().forEach((v) => { vendMap[v.id] = v.nome; });
+
+  const conversas = [];
+  let acumulado = 0;
+  for (const lead of leads) {
+    if (acumulado >= ORCAMENTO_CHARS) break;
+    const todas = db.prepare('SELECT * FROM mensagens WHERE lead_id = ? ORDER BY criado_em ASC').all(lead.id);
+    const mensagens = todas.slice(-LIMITE_MENSAGENS).map((m) => ({
+      ...m,
+      texto: m.texto ? String(m.texto).slice(0, MAX_CHARS_MSG) : m.texto,
+    }));
+    if (mensagens.length === 0) continue;
+    lead.vendedor_nome = lead.vendedor_id ? (vendMap[lead.vendedor_id] || null) : null;
+    const tamanho = mensagens.reduce((s, m) => s + ((m.texto || '').length) + 24, 0) + 60;
+    conversas.push({ lead, mensagens });
+    acumulado += tamanho;
+  }
+  return conversas;
+}
+
 function agoraBRT() {
   const agora = new Date();
   const brt = new Date(agora.getTime() - 3 * 60 * 60 * 1000); // UTC-3
@@ -166,31 +208,38 @@ async function rodarAnaliseDiaria() {
     }
   }
 
-  // 1.5) FINANCEIRO — não gera tarefa por lead: varre TODAS as conversas
-  // do setor com atividade hoje (aberta ou encerrada) e escreve 1
-  // relatório só, apontando gargalo de cobrança/negociação, pro admin ler.
-  if (setorFinanceiro) {
+  // 1.5) CURADORIA DE QUALIDADE (diária) — roda pro setor DESTE sistema
+  // (Vendas ou Financeiro, conforme a variável SETOR). Varre TODAS as
+  // conversas com atividade hoje e gera o relatório de desempenho por
+  // vendedor (texto humano + bloco de métricas em JSON). Guarda em
+  // analises_personalizadas com metricas_json — é isso que o dashboard
+  // externo lê como "análise mais recente", atualizando sozinho todo dia.
+  // No Financeiro, também atualiza o relatório diário (relatorios_financeiro),
+  // que é o que esse setor já exibia na tela.
+  let curadoriaQualidadeGerada = false;
+  const SETOR_ATIVO = (process.env.SETOR || 'vendas').toLowerCase();
+  const setorAtivo = db.getSetorPorSlug(SETOR_ATIVO);
+  if (setorAtivo) {
     const hojeISO = agoraBRT().dataISO;
-    const leadsFinanceiroHoje = db.prepare(`
-      SELECT DISTINCT leads.* FROM leads
-      JOIN mensagens ON mensagens.lead_id = leads.id
-      WHERE leads.setor_id = ? AND date(mensagens.criado_em) = date('now')
-    `).all(setorFinanceiro.id);
-
-    if (leadsFinanceiroHoje.length > 0) {
-      const conversas = leadsFinanceiroHoje.map((lead) => ({
-        lead,
-        mensagens: db.prepare('SELECT * FROM mensagens WHERE lead_id = ? ORDER BY criado_em ASC').all(lead.id),
-      })).filter((c) => c.mensagens.length > 0);
-
-      const relatorio = await claudeIA.analisarFinanceiroDiario(conversas);
-      if (relatorio) {
+    const conversas = montarConversasDoDia(setorAtivo.id);
+    if (conversas.length > 0) {
+      const q = await claudeIA.analisarQualidade(conversas, { setor: SETOR_ATIVO });
+      if (q && q.conteudo && !q.erro) {
+        const metricasJson = q.metricas ? JSON.stringify(q.metricas) : null;
         db.prepare(`
-          INSERT INTO relatorios_financeiro (setor_id, data, conteudo, gerado_em)
-          VALUES (?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
-          ON CONFLICT(setor_id, data) DO UPDATE SET conteudo = excluded.conteudo, gerado_em = excluded.gerado_em
-        `).run(setorFinanceiro.id, hojeISO, relatorio);
-        relatorioFinanceiroGerado = true;
+          INSERT INTO analises_personalizadas (setor_id, instrucao, conteudo, metricas_json, criado_por, gerado_em)
+          VALUES (?, 'Análise diária automática', ?, ?, NULL, strftime('%Y-%m-%d %H:%M:%f','now'))
+        `).run(setorAtivo.id, q.conteudo, metricasJson);
+
+        if (SETOR_ATIVO === 'financeiro') {
+          db.prepare(`
+            INSERT INTO relatorios_financeiro (setor_id, data, conteudo, metricas_json, gerado_em)
+            VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
+            ON CONFLICT(setor_id, data) DO UPDATE SET conteudo = excluded.conteudo, metricas_json = excluded.metricas_json, gerado_em = excluded.gerado_em
+          `).run(setorAtivo.id, hojeISO, q.conteudo, metricasJson);
+          relatorioFinanceiroGerado = true;
+        }
+        curadoriaQualidadeGerada = true;
       }
     }
   }
@@ -222,7 +271,7 @@ async function rodarAnaliseDiaria() {
     }
   }
 
-  console.log(`>> Análise diária concluída: ${leadsAbertos.length} conversas em aberto revisadas, ${encerradosClassificados.length} encerrada(s) classificada(s), ${tarefasCriadas.length} tarefa(s) criada(s)${relatorioFinanceiroGerado ? ', relatório do Financeiro gerado' : ''}.`);
+  console.log(`>> Análise diária concluída: ${leadsAbertos.length} conversas em aberto revisadas, ${encerradosClassificados.length} encerrada(s) classificada(s), ${tarefasCriadas.length} tarefa(s) criada(s)${curadoriaQualidadeGerada ? ', curadoria de qualidade gerada' : ''}.`);
   return {
     rodou: true,
     conversas_revisadas: leadsAbertos.length,
@@ -232,6 +281,7 @@ async function rodarAnaliseDiaria() {
     tarefas_criadas: tarefasCriadas,
     leads_esquecidos: leadsEsquecidos,
     relatorio_financeiro_gerado: relatorioFinanceiroGerado,
+    curadoria_qualidade_gerada: curadoriaQualidadeGerada,
   };
 }
 

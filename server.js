@@ -1829,21 +1829,35 @@ app.post('/api/relatorios-financeiro/gerar-agora', requireAuth, requireAdmin, as
     return res.status(400).json({ erro: 'nenhuma conversa com mensagem hoje nesse setor ainda' });
   }
 
-  const conversas = leadsHoje.map((lead) => ({
-    lead,
-    mensagens: db.prepare('SELECT * FROM mensagens WHERE lead_id = ? ORDER BY criado_em ASC').all(lead.id),
-  })).filter((c) => c.mensagens.length > 0);
+  const vendMap = {};
+  db.prepare('SELECT id, nome FROM vendedores').all().forEach((v) => { vendMap[v.id] = v.nome; });
 
-  const relatorio = await claudeIA.analisarFinanceiroDiario(conversas);
-  if (!relatorio) return res.status(500).json({ erro: 'a IA não conseguiu gerar o relatório agora — tenta de novo em instantes' });
+  const conversas = leadsHoje.map((lead) => {
+    lead.vendedor_nome = lead.vendedor_id ? (vendMap[lead.vendedor_id] || null) : null;
+    return { lead, mensagens: db.prepare('SELECT * FROM mensagens WHERE lead_id = ? ORDER BY criado_em ASC').all(lead.id) };
+  }).filter((c) => c.mensagens.length > 0);
+
+  // Mesma curadoria de qualidade da análise diária, sob demanda (botão do
+  // Financeiro): texto humano + métricas por atendente, guardado com o JSON.
+  const resultado = await claudeIA.analisarQualidade(conversas, { setor: 'financeiro' });
+  if (!resultado || resultado.erro) return res.status(500).json({ erro: (resultado && resultado.erro) || 'a IA não conseguiu gerar o relatório agora — tenta de novo em instantes' });
+
+  const metricasJson = resultado.metricas ? JSON.stringify(resultado.metricas) : null;
 
   db.prepare(`
-    INSERT INTO relatorios_financeiro (setor_id, data, conteudo, gerado_em)
-    VALUES (?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
-    ON CONFLICT(setor_id, data) DO UPDATE SET conteudo = excluded.conteudo, gerado_em = excluded.gerado_em
-  `).run(setorAtivo.id, hojeISO, relatorio);
+    INSERT INTO relatorios_financeiro (setor_id, data, conteudo, metricas_json, gerado_em)
+    VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
+    ON CONFLICT(setor_id, data) DO UPDATE SET conteudo = excluded.conteudo, metricas_json = excluded.metricas_json, gerado_em = excluded.gerado_em
+  `).run(setorAtivo.id, hojeISO, resultado.conteudo, metricasJson);
 
-  res.json({ ok: true, data: hojeISO, conteudo: relatorio });
+  // Também registra no histórico de análises, pra o dashboard externo pegar
+  // como "análise mais recente" mesmo quando gerada manualmente.
+  db.prepare(`
+    INSERT INTO analises_personalizadas (setor_id, instrucao, conteudo, metricas_json, criado_por, gerado_em)
+    VALUES (?, 'Análise diária automática', ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
+  `).run(setorAtivo.id, resultado.conteudo, metricasJson, req.usuario.id);
+
+  res.json({ ok: true, data: hojeISO, conteudo: resultado.conteudo, metricas: resultado.metricas || null });
 });
 
 // ---------------------------------------------------------------
@@ -1887,6 +1901,12 @@ app.post('/api/analise-personalizada', requireAuth, requireAdmin, async (req, re
     return res.status(400).json({ erro: 'ainda não há conversas com mensagens nesse setor pra analisar' });
   }
 
+  // Nome do atendente responsável por lead — a curadoria de qualidade
+  // atribui as métricas por vendedor usando esse nome (as mensagens não
+  // guardam quem enviou, então usamos o dono da conversa como referência).
+  const vendMap = {};
+  db.prepare('SELECT id, nome FROM vendedores').all().forEach((v) => { vendMap[v.id] = v.nome; });
+
   // Monta as conversas respeitando um orçamento de caracteres — assim um
   // setor com muito histórico (Vendas roda há meses) manda um recorte
   // recente e responde rápido, em vez de mandar tudo e a IA recusar/travar.
@@ -1900,6 +1920,7 @@ app.post('/api/analise-personalizada', requireAuth, requireAdmin, async (req, re
       texto: m.texto ? String(m.texto).slice(0, MAX_CHARS_MSG) : m.texto,
     }));
     if (mensagens.length === 0) continue;
+    lead.vendedor_nome = lead.vendedor_id ? (vendMap[lead.vendedor_id] || null) : null;
     const tamanho = mensagens.reduce((s, m) => s + ((m.texto || '').length) + 24, 0) + 60;
     conversas.push({ lead, mensagens });
     acumulado += tamanho;
@@ -1909,20 +1930,23 @@ app.post('/api/analise-personalizada', requireAuth, requireAdmin, async (req, re
     return res.status(400).json({ erro: 'ainda não há conversas com mensagens nesse setor pra analisar' });
   }
 
-  const resultado = await claudeIA.analisarPersonalizado(conversas, instrucao);
+  // Curadoria de qualidade (por vendedor): a instrução do admin entra como
+  // FOCO ADICIONAL, sem tirar o bloco de métricas estruturado.
+  const resultado = await claudeIA.analisarQualidade(conversas, { setor: setorAtivo.slug, instrucao });
   if (!resultado || resultado.erro) {
     return res.status(502).json({ erro: (resultado && resultado.erro) || 'a IA não conseguiu gerar a análise agora — tenta de novo em instantes' });
   }
 
-  // Guarda no histórico do setor (data + pergunta + conteúdo completo), pra
-  // o admin reabrir depois. A tela mostra só data + pergunta; o texto inteiro
-  // só quando clica.
-  const info = db.prepare(`
-    INSERT INTO analises_personalizadas (setor_id, instrucao, conteudo, criado_por, gerado_em)
-    VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
-  `).run(setorAtivo.id, instrucao, resultado.conteudo, req.usuario.id);
+  const metricasJson = resultado.metricas ? JSON.stringify(resultado.metricas) : null;
 
-  res.json({ ok: true, id: info.lastInsertRowid, conteudo: resultado.conteudo, conversas_analisadas: conversas.length });
+  // Guarda no histórico do setor (pergunta + texto humano + métricas em JSON),
+  // pra o admin reabrir depois e pro dashboard externo ler direto.
+  const info = db.prepare(`
+    INSERT INTO analises_personalizadas (setor_id, instrucao, conteudo, metricas_json, criado_por, gerado_em)
+    VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
+  `).run(setorAtivo.id, instrucao, resultado.conteudo, metricasJson, req.usuario.id);
+
+  res.json({ ok: true, id: info.lastInsertRowid, conteudo: resultado.conteudo, metricas: resultado.metricas || null, conversas_analisadas: conversas.length });
 });
 
 // Histórico das análises sob medida do setor — só data + pergunta (id pra
@@ -1947,6 +1971,77 @@ app.get('/api/analises-personalizadas/:id', requireAuth, requireAdmin, (req, res
   `).get(req.params.id, setorAtivo.id);
   if (!analise) return res.status(404).json({ erro: 'análise não encontrada nesse setor' });
   res.json(analise);
+});
+
+// ---------------------------------------------------------------
+// ENDPOINT EXTERNO (dashboard) — protegido por TOKEN, não por sessão.
+// Serve a curadoria de qualidade (texto humano + métricas em JSON) do setor
+// DESTE serviço, pra um painel externo consumir. O token é definido por
+// serviço na variável RELATORIO_TOKEN (valor diferente no Vendas e no
+// Financeiro). Somente leitura.
+// ---------------------------------------------------------------
+function resumirTituloAnalise(instrucao) {
+  const txt = (instrucao || '').trim();
+  if (!txt || /an[áa]lise di[áa]ria/i.test(txt)) return 'Análise diária';
+  return txt.length > 80 ? txt.slice(0, 79) + '…' : txt;
+}
+function parseMetricasSeguro(json) {
+  if (!json) return null;
+  try { return JSON.parse(json); } catch { return null; }
+}
+
+app.get('/api/externo/relatorio', (req, res) => {
+  const TOKEN = process.env.RELATORIO_TOKEN;
+  if (!TOKEN) {
+    return res.status(503).json({ erro: 'endpoint externo não configurado neste serviço (defina a variável RELATORIO_TOKEN no Railway)' });
+  }
+  const auth = req.get('authorization') || '';
+  const m = auth.match(/^Bearer\s+(.+)$/i);
+  if (!m || m[1].trim() !== TOKEN) {
+    return res.status(401).json({ erro: 'token inválido ou ausente' });
+  }
+
+  const setorObj = db.getSetorPorSlug(SETOR);
+  const setorId = setorObj ? setorObj.id : -1;
+
+  // A análise pedida (?id=) ou a mais recente do setor.
+  let analiseRow;
+  if (req.query.id) {
+    analiseRow = db.prepare('SELECT * FROM analises_personalizadas WHERE id = ? AND setor_id = ?').get(req.query.id, setorId);
+  } else {
+    analiseRow = db.prepare('SELECT * FROM analises_personalizadas WHERE setor_id = ? ORDER BY gerado_em DESC LIMIT 1').get(setorId);
+  }
+
+  const analise = analiseRow ? {
+    id: analiseRow.id,
+    titulo: resumirTituloAnalise(analiseRow.instrucao),
+    gerado_em: analiseRow.gerado_em,
+    conteudo: analiseRow.conteudo,
+    metricas: parseMetricasSeguro(analiseRow.metricas_json),
+  } : null;
+
+  const historico = db.prepare(`
+    SELECT id, instrucao, gerado_em FROM analises_personalizadas
+    WHERE setor_id = ? ORDER BY gerado_em DESC LIMIT 20
+  `).all(setorId).map((r) => ({ id: r.id, titulo: resumirTituloAnalise(r.instrucao), gerado_em: r.gerado_em }));
+
+  // Relatório diário: só faz sentido no Financeiro (no Vendas volta null).
+  let relatorio_diario = null;
+  if (SETOR === 'financeiro') {
+    const rd = db.prepare(`
+      SELECT data, conteudo, gerado_em, metricas_json FROM relatorios_financeiro
+      WHERE setor_id = ? ORDER BY data DESC LIMIT 1
+    `).get(setorId);
+    if (rd) relatorio_diario = { data: rd.data, conteudo: rd.conteudo, gerado_em: rd.gerado_em, metricas: parseMetricasSeguro(rd.metricas_json) };
+  }
+
+  res.json({
+    setor: SETOR,
+    atualizado_em: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' '),
+    analise,
+    historico,
+    relatorio_diario,
+  });
 });
 
 // ---------------------------------------------------------------

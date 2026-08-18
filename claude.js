@@ -262,4 +262,157 @@ Priorize os casos MAIS relevantes e agrupe por tema, em vez de listar exaustivam
   return { conteudo: r.texto };
 }
 
-module.exports = { processarNovaMensagem, analisarConversa, sugerirTarefa, analisarDiaria, analisarFinanceiroDiario, analisarPersonalizado, configurado };
+// ---------------------------------------------------------------
+// CURADORIA DE QUALIDADE DE ATENDIMENTO (por vendedor)
+// ---------------------------------------------------------------
+// Prompt fixo de análise de qualidade: mede tempo de resposta, tempo até
+// orçamento/proposta e encaminhamento comercial (link de pagamento / PIX),
+// e devolve DUAS partes: (1) texto pra leitura humana e (2) um bloco JSON
+// estruturado entre marcadores, que a gente extrai e guarda pra alimentar o
+// dashboard externo sem precisar garimpar texto.
+//
+// O bloco JSON é IDÊNTICO nos dois setores (mesmas chaves) — só muda o
+// vocabulário da parte de leitura humana: no Financeiro "orçamento" vira
+// "proposta/negociação de cobrança" e "motivos" viram "objeções de cobrança".
+
+const BLOCO_JSON_QUALIDADE = `PARTE 2 — Bloco de dados entre os marcadores exatos abaixo, em JSON válido:
+<<<METRICAS_JSON>>>
+{
+  "periodo": {"de":"YYYY-MM-DD","ate":"YYYY-MM-DD"},
+  "resumo": {
+    "conversas_analisadas": 0,
+    "tempo_resposta_medio_min": 0,
+    "tempo_ate_orcamento_medio_min": 0,
+    "pct_enviou_link_pagamento": 0,
+    "pct_enviou_pix": 0
+  },
+  "por_vendedor": [
+    {"vendedor":"Nome","conversas":0,"tempo_resposta_medio_min":0,
+     "tempo_ate_orcamento_medio_min":0,"enviou_link_pct":0,"enviou_pix_pct":0,
+     "atendimentos_com_atraso":0}
+  ],
+  "rankings": {
+    "resposta_mais_lenta":  [{"vendedor":"Nome","tempo_min":0}],
+    "orcamento_mais_lento": [{"vendedor":"Nome","tempo_min":0}],
+    "menos_envia_link":     [{"vendedor":"Nome","pct":0}],
+    "menos_envia_pix":      [{"vendedor":"Nome","pct":0}]
+  },
+  "motivos": [ {"motivo":"texto curto","qtd":0} ],
+  "alertas": [ {"vendedor":"Nome","situacao":"cliente aguardando orçamento há X"} ]
+}
+<<<FIM_METRICAS>>>`;
+
+const PROMPT_QUALIDADE_VENDAS = `Você é um analista de qualidade de atendimento. Analise as conversas de WhatsApp do período e produza um relatório de DESEMPENHO POR VENDEDOR, focado em tempo e no encaminhamento comercial.
+Regras:
+- Use os horários das mensagens. "Tempo de resposta" = intervalo entre a mensagem do CLIENTE e a próxima resposta do VENDEDOR.
+- "Tempo até orçamento" = do interesse do cliente até o vendedor enviar o orçamento/proposta.
+- Detecte no texto/anexos se o vendedor enviou ORÇAMENTO, LINK DE PAGAMENTO e PIX (chave ou QR), e quando.
+- Limites (SLA): resposta ideal até 5 min; orçamento ideal até 20 min. Acima disso conte como "atraso".
+- Cada conversa traz o "Atendente responsável" no cabeçalho — atribua as métricas por vendedor usando esse nome. Nunca invente um nome que não esteja no material.
+- Se algo não puder ser calculado, escreva "indisponível". NUNCA invente.
+Entregue DUAS partes:
+PARTE 1 — Relatório em texto (leitura humana): resumo, quem vai bem, quem está travando (respondendo devagar, demorando no orçamento, não mandando link/pix) e recomendações.
+${BLOCO_JSON_QUALIDADE}`;
+
+const PROMPT_QUALIDADE_FINANCEIRO = `Você é um analista de qualidade de atendimento do setor Financeiro (cobrança e negociação de pagamentos). Analise as conversas de WhatsApp do período e produza um relatório de DESEMPENHO POR ATENDENTE, focado em tempo e no encaminhamento da negociação de cobrança.
+Regras:
+- Use os horários das mensagens. "Tempo de resposta" = intervalo entre a mensagem do CLIENTE e a próxima resposta do ATENDENTE.
+- "Tempo até proposta" = do momento em que a cobrança/negociação começa até o atendente enviar a proposta/negociação de cobrança (boleto, acordo, condições).
+- Detecte no texto/anexos se o atendente enviou PROPOSTA/COBRANÇA, LINK DE PAGAMENTO e PIX (chave ou QR), e quando.
+- Limites (SLA): resposta ideal até 5 min; proposta de cobrança ideal até 20 min. Acima disso conte como "atraso".
+- Cada conversa traz o "Atendente responsável" no cabeçalho — atribua as métricas por atendente usando esse nome. Nunca invente um nome que não esteja no material.
+- Em "motivos", liste as OBJEÇÕES DE COBRANÇA mais comuns (por que o cliente não fecha o acordo/pagamento).
+- Se algo não puder ser calculado, escreva "indisponível". NUNCA invente.
+Entregue DUAS partes:
+PARTE 1 — Relatório em texto (leitura humana): resumo, quem vai bem, quem está travando (respondendo devagar, demorando na proposta de cobrança, não mandando link/pix) e recomendações.
+${BLOCO_JSON_QUALIDADE}`;
+
+// Separa o texto humano (PARTE 1) do bloco de métricas (PARTE 2). Devolve o
+// conteudo já SEM os marcadores (pra não vazar na tela) e as métricas já
+// parseadas (ou null se o modelo não produziu / veio inválido).
+function extrairMetricas(texto) {
+  if (!texto) return { conteudo: '', metricas: null };
+  const re = /<<<METRICAS_JSON>>>([\s\S]*?)<<<FIM_METRICAS>>>/;
+  const m = texto.match(re);
+  let metricas = null;
+  if (m) {
+    try { metricas = JSON.parse(m[1].replace(/```json|```/g, '').trim()); } catch { metricas = null; }
+  }
+  // Remove o bloco inteiro (fechado). Se por acaso veio só o marcador de
+  // abertura sem o de fechamento, corta dali pra frente também.
+  let conteudo = texto.replace(re, '').replace(/<<<METRICAS_JSON>>>[\s\S]*$/, '');
+  conteudo = conteudo.replace(/PARTE\s*2\s*—.*$/is, '').trim();
+  return { conteudo: conteudo.trim(), metricas };
+}
+
+// Descobre o intervalo de datas (YYYY-MM-DD) coberto pelas conversas, pra
+// preencher "periodo" no material e ajudar o modelo a datar o relatório.
+function calcularPeriodoConversas(conversas) {
+  let min = null, max = null;
+  for (const { mensagens } of conversas) {
+    for (const msg of mensagens) {
+      const bruto = msg.criado_em || '';
+      if (!bruto) continue;
+      const dia = bruto.slice(0, 10);
+      if (!min || dia < min) min = dia;
+      if (!max || dia > max) max = dia;
+    }
+  }
+  const hoje = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  return { de: min || hoje, ate: max || hoje };
+}
+
+function transcricaoQualidade(mensagens) {
+  return mensagens
+    .map((m) => {
+      const bruto = m.criado_em || '';
+      const hora = new Date(bruto + (bruto.includes('Z') ? '' : 'Z'))
+        .toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+      const quem = m.remetente === 'cliente' ? 'Cliente' : m.remetente === 'ia' ? 'IA' : 'Atendente';
+      let texto = m.apagada ? '[mensagem apagada]' : (m.texto || '');
+      // Anexos ajudam a detectar orçamento/boleto/link — sinaliza o tipo.
+      if (m.midia_tipo) texto = (texto ? texto + ' ' : '') + `[anexo: ${m.midia_tipo}${m.midia_nome ? ' ' + m.midia_nome : ''}]`;
+      return `[${hora}] ${quem}: ${texto}`;
+    })
+    .join('\n');
+}
+
+// Gera a curadoria de qualidade (por vendedor). conversas: [{lead, mensagens}],
+// onde lead.vendedor_nome traz o nome do atendente responsável (resolvido por
+// quem chama). opts: { setor, instrucao?, periodo? }.
+// Retorna { conteudo, metricas, periodo } ou { erro }.
+async function analisarQualidade(conversas, opts = {}) {
+  const setor = (opts.setor || 'vendas').toLowerCase();
+  if (!configurado) return { erro: 'IA não configurada (falta ANTHROPIC_API_KEY no servidor).' };
+  if (!conversas || conversas.length === 0) return { erro: 'nenhuma conversa com mensagens pra analisar nesse setor.' };
+
+  const system = setor === 'financeiro' ? PROMPT_QUALIDADE_FINANCEIRO : PROMPT_QUALIDADE_VENDAS;
+  const periodo = opts.periodo || calcularPeriodoConversas(conversas);
+  const foco = opts.instrucao && String(opts.instrucao).trim()
+    ? `\n\nFOCO ADICIONAL PEDIDO PELA GESTÃO (dê ênfase a isto na PARTE 1, mas SEM deixar de preencher a PARTE 2 completa): ${String(opts.instrucao).trim()}`
+    : '';
+
+  const userMsg = `Período analisado: de ${periodo.de} até ${periodo.ate}.${foco}\n\n===== CONVERSAS DO SETOR (${conversas.length}) =====\n\n` +
+    conversas
+      .map(({ lead, mensagens }) => {
+        const dono = lead.vendedor_nome || 'sem atendente definido';
+        const situacao = lead.status === 'encerrado' ? 'encerrada' : 'ativa';
+        return `=== Conversa com ${lead.nome_cliente || lead.telefone} (${situacao}; Atendente responsável: ${dono}) ===\n${transcricaoQualidade(mensagens)}`;
+      })
+      .join('\n\n');
+
+  // Precisa de espaço pra escrever o texto E o JSON — orçamento generoso, com
+  // as mesmas redes de segurança da análise sob medida (retry / cai pra 4000).
+  let r = await chamarClaudeComMotivo(system, userMsg, 6000);
+  if (r.semTexto) {
+    r = await chamarClaudeComMotivo(system, userMsg, 6000);
+  } else if (!r.texto && /max_tokens/i.test(r.erro || '')) {
+    r = await chamarClaudeComMotivo(system, userMsg, 4000);
+  }
+  if (!r.texto) return { erro: r.erro || 'a IA não conseguiu gerar a análise agora — tenta de novo em instantes.' };
+
+  const { conteudo, metricas } = extrairMetricas(r.texto);
+  return { conteudo: conteudo || r.texto, metricas, periodo };
+}
+
+module.exports = { processarNovaMensagem, analisarConversa, sugerirTarefa, analisarDiaria, analisarFinanceiroDiario, analisarPersonalizado, analisarQualidade, configurado };
