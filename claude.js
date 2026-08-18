@@ -336,26 +336,47 @@ ${BLOCO_JSON_QUALIDADE}
 Depois do bloco acima, escreva o RELATÓRIO EM TEXTO (leitura humana), objetivo: resumo, quem vai bem, quem está travando (respondendo devagar, demorando na proposta de cobrança, não mandando link/pix) e recomendações.
 ${REGRA_TAMANHO_QUALIDADE}`;
 
-// Separa o bloco de métricas (JSON entre marcadores) do texto humano. Funciona
-// com o bloco em QUALQUER posição — hoje o prompt pede o bloco PRIMEIRO, mas o
-// parser não depende disso. Devolve o conteudo já SEM os marcadores (pra não
-// vazar na tela) e as métricas parseadas (ou null se não veio / veio inválido).
+// Extrai o PRIMEIRO objeto JSON balanceado a partir de um texto (varre as
+// chaves { }). Salva o caso comum de truncamento: o JSON terminou, mas o
+// marcador <<<FIM_METRICAS>>> foi cortado pelo limite de tokens.
+function extrairPrimeiroJSON(texto) {
+  const ini = texto.indexOf('{');
+  if (ini < 0) return null;
+  let prof = 0, emString = false, escapando = false;
+  for (let i = ini; i < texto.length; i++) {
+    const ch = texto[i];
+    if (escapando) { escapando = false; continue; }
+    if (ch === '\\') { escapando = true; continue; }
+    if (ch === '"') { emString = !emString; continue; }
+    if (emString) continue;
+    if (ch === '{') prof++;
+    else if (ch === '}') { prof--; if (prof === 0) { try { return JSON.parse(texto.slice(ini, i + 1)); } catch { return null; } } }
+  }
+  return null;
+}
+
+// Separa o bloco de métricas (JSON entre marcadores) do texto humano. Robusto a
+// truncamento: se o marcador de fechamento foi cortado, ainda tenta recuperar o
+// JSON. Devolve o conteudo SEM marcadores (nunca vaza o bloco cru na tela) e as
+// métricas parseadas (ou null).
 function extrairMetricas(texto) {
   if (!texto) return { conteudo: '', metricas: null };
   const re = /<<<METRICAS_JSON>>>([\s\S]*?)<<<FIM_METRICAS>>>/;
   const m = texto.match(re);
   let metricas = null;
+  const ab = texto.indexOf('<<<METRICAS_JSON>>>');
+
   if (m) {
-    try { metricas = JSON.parse(m[1].replace(/```json|```/g, '').trim()); } catch { metricas = null; }
+    try { metricas = JSON.parse(m[1].replace(/```json|```/g, '').trim()); } catch { metricas = extrairPrimeiroJSON(m[1]); }
+  } else if (ab >= 0) {
+    // Sem marcador de fechamento (resposta truncada) — tenta recuperar o JSON.
+    metricas = extrairPrimeiroJSON(texto.slice(ab + '<<<METRICAS_JSON>>>'.length));
   }
+
+  // conteudo = texto humano, SEM o bloco de métricas nem marcadores.
   let conteudo = texto;
-  if (m) {
-    conteudo = conteudo.replace(re, '');                         // remove o bloco fechado (onde estiver)
-  } else {
-    conteudo = conteudo.replace(/<<<METRICAS_JSON>>>[\s\S]*$/, ''); // truncado: corta do marcador de abertura
-  }
-  // Tira só os RÓTULOS de seção que possam ter sobrado (sem apagar o corpo do
-  // texto) e qualquer marcador solto, e limpa linhas em branco no começo/fim.
+  if (m) conteudo = texto.replace(re, '');
+  else if (ab >= 0) conteudo = texto.slice(0, ab); // corta tudo do marcador de abertura em diante
   conteudo = conteudo
     .replace(/<<<\/?FIM_METRICAS>>>|<<<METRICAS_JSON>>>/g, '')
     .replace(/^\s*PARTE\s*\d+\s*[—:.-]\s*/gim, '')
@@ -407,6 +428,13 @@ ${BLOCO_JSON_QUALIDADE}`;
 const PROMPT_METRICAS_FINANCEIRO = `Você é um analista de qualidade do setor Financeiro (cobrança/negociação) de uma loja de material de construção. Com base nas conversas do período, produza SOMENTE o bloco de métricas por atendente abaixo, em JSON válido, entre os marcadores exatos, sem escrever NENHUM texto antes ou depois. Use os horários pra calcular tempo de resposta/proposta de cobrança e detecte envio de proposta, link de pagamento e PIX. Em "motivos", use as objeções de cobrança. O "Atendente responsável" vem no cabeçalho de cada conversa — use esse nome. Se algo não puder ser calculado, use "indisponível" ou 0; NUNCA invente.
 ${BLOCO_JSON_QUALIDADE}`;
 
+// Prompt curto do texto HUMANO — roda numa 2ª chamada, alimentado só pelas
+// métricas já calculadas (entrada minúscula), então quase nunca estoura o
+// limite. Mantém o relatório de leitura consistente com os números.
+const PROMPT_TEXTO_VENDAS = `Você é um analista de qualidade de atendimento de uma loja de material de construção. Vai receber MÉTRICAS já calculadas (JSON) de desempenho por vendedor. Escreva um resumo curto e objetivo em português, no MÁXIMO 12 linhas, em texto corrido (sem markdown, sem asteriscos): quem vai bem, quem está travando (resposta lenta, demora no orçamento, não envia link de pagamento/PIX) e 2 a 3 recomendações práticas. Use SOMENTE os números fornecidos — não invente dados. Não repita o JSON.`;
+
+const PROMPT_TEXTO_FINANCEIRO = `Você é um analista de qualidade do setor Financeiro (cobrança/negociação) de uma loja de material de construção. Vai receber MÉTRICAS já calculadas (JSON) de desempenho por atendente. Escreva um resumo curto e objetivo em português, no MÁXIMO 12 linhas, em texto corrido (sem markdown, sem asteriscos): quem vai bem, quem está travando (resposta lenta, demora na proposta de cobrança, não envia link de pagamento/PIX) e 2 a 3 recomendações práticas. Use SOMENTE os números fornecidos — não invente dados. Não repita o JSON.`;
+
 // Enxuga o material enviado à IA: menos conversas e menos mensagens por
 // conversa. Isso reduz drasticamente o "trabalho" do modelo — a principal
 // causa do estouro de max_tokens era mandar conversa demais de uma vez.
@@ -457,36 +485,39 @@ async function analisarQualidade(conversas, opts = {}) {
   const enxutas = compactarConversas(conversas);
   if (enxutas.length === 0) return { erro: 'nenhuma conversa com mensagens pra analisar nesse setor.' };
 
-  const system = setor === 'financeiro' ? PROMPT_QUALIDADE_FINANCEIRO : PROMPT_QUALIDADE_VENDAS;
   const periodo = opts.periodo || calcularPeriodoConversas(enxutas);
   const userMsg = montarUserMsgQualidade(enxutas, periodo, opts.instrucao);
 
-  // 1ª tentativa: relatório completo (métricas primeiro + texto), 8000 tokens.
-  // 8000 é o teto que este modelo aceita; passar disso ele recusa.
-  let r = await chamarClaudeComMotivo(system, userMsg, 8000);
-  if (r.semTexto) r = await chamarClaudeComMotivo(system, userMsg, 8000); // 1 retry (varia entre chamadas)
-
-  if (r.texto) {
-    const { conteudo, metricas } = extrairMetricas(r.texto);
-    return { conteudo: conteudo || r.texto, metricas, periodo };
-  }
-
-  // Fallback: se o completo não coube, pede SÓ as métricas (resposta curta) —
-  // assim o dashboard recebe os números mesmo quando o texto não cabe.
+  // ESTRATÉGIA EM DUAS CHAMADAS (mais confiável que uma só):
+  // 1) MÉTRICAS primeiro — objetivo principal (alimenta o dashboard). Saída
+  //    pequena e delimitada; com 8000 tokens de teto, cabe folgado mesmo se o
+  //    modelo "pensar" bastante. Pedir texto + JSON juntos era o que estourava.
   const systemMet = setor === 'financeiro' ? PROMPT_METRICAS_FINANCEIRO : PROMPT_METRICAS_VENDAS;
-  const rm = await chamarClaudeComMotivo(systemMet, userMsg, 4000);
-  if (rm.texto) {
-    const { metricas } = extrairMetricas(rm.texto);
-    if (metricas) {
-      return {
-        conteudo: 'Resumo em texto indisponível nesta rodada (a resposta ficaria longa demais para o limite do modelo). As métricas foram geradas normalmente e estão no painel.',
-        metricas,
-        periodo,
-      };
-    }
+  let rm = await chamarClaudeComMotivo(systemMet, userMsg, 8000);
+  if (!extrairMetricas(rm.texto || '').metricas) {
+    rm = await chamarClaudeComMotivo(systemMet, userMsg, 8000); // 1 retry
+  }
+  const metricas = extrairMetricas(rm.texto || '').metricas;
+  if (!metricas) {
+    return { erro: rm.erro || 'a IA não conseguiu gerar as métricas agora — tenta de novo em instantes.' };
   }
 
-  return { erro: r.erro || 'a IA não conseguiu gerar a análise agora — tenta de novo em instantes.' };
+  // 2) TEXTO humano — 2ª chamada curta, alimentada SÓ pelas métricas já
+  //    calculadas (entrada minúscula), então praticamente nunca estoura. Se
+  //    mesmo assim falhar, devolve as métricas com um aviso curto no lugar do
+  //    texto — o painel nunca fica sem número.
+  const systemTxt = setor === 'financeiro' ? PROMPT_TEXTO_FINANCEIRO : PROMPT_TEXTO_VENDAS;
+  const foco = opts.instrucao && String(opts.instrucao).trim()
+    ? `\n\nFoco pedido pela gestão: ${String(opts.instrucao).trim()}`
+    : '';
+  const msgTxt = `Período: de ${periodo.de} até ${periodo.ate}.${foco}\n\nMÉTRICAS (JSON) já calculadas:\n${JSON.stringify(metricas)}`;
+  let rt = await chamarClaudeComMotivo(systemTxt, msgTxt, 2500);
+  if (rt.semTexto) rt = await chamarClaudeComMotivo(systemTxt, msgTxt, 2500);
+  const conteudo = rt.texto
+    ? (extrairMetricas(rt.texto).conteudo || rt.texto.trim())
+    : 'As métricas foram geradas e estão no painel. (O resumo em texto não pôde ser gerado nesta rodada — tente novamente se quiser o texto.)';
+
+  return { conteudo, metricas, periodo };
 }
 
 module.exports = { processarNovaMensagem, analisarConversa, sugerirTarefa, analisarDiaria, analisarFinanceiroDiario, analisarPersonalizado, analisarQualidade, configurado };
