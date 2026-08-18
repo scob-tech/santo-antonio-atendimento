@@ -397,6 +397,54 @@ function transcricaoQualidade(mensagens) {
     .join('\n');
 }
 
+// Prompt de EMERGÊNCIA (fallback): pede SÓ o bloco de métricas, sem texto
+// humano. É uma resposta curta, que quase sempre cabe no limite do modelo —
+// garante que o dashboard receba os números mesmo quando o relatório completo
+// (texto + JSON) não cabe. Roda só quando o completo falha.
+const PROMPT_METRICAS_VENDAS = `Você é um analista de qualidade de atendimento de uma loja de material de construção. Com base nas conversas do período, produza SOMENTE o bloco de métricas por vendedor abaixo, em JSON válido, entre os marcadores exatos, sem escrever NENHUM texto antes ou depois. Use os horários pra calcular tempo de resposta/orçamento e detecte envio de orçamento, link de pagamento e PIX. O "Atendente responsável" vem no cabeçalho de cada conversa — use esse nome. Se algo não puder ser calculado, use "indisponível" ou 0; NUNCA invente.
+${BLOCO_JSON_QUALIDADE}`;
+
+const PROMPT_METRICAS_FINANCEIRO = `Você é um analista de qualidade do setor Financeiro (cobrança/negociação) de uma loja de material de construção. Com base nas conversas do período, produza SOMENTE o bloco de métricas por atendente abaixo, em JSON válido, entre os marcadores exatos, sem escrever NENHUM texto antes ou depois. Use os horários pra calcular tempo de resposta/proposta de cobrança e detecte envio de proposta, link de pagamento e PIX. Em "motivos", use as objeções de cobrança. O "Atendente responsável" vem no cabeçalho de cada conversa — use esse nome. Se algo não puder ser calculado, use "indisponível" ou 0; NUNCA invente.
+${BLOCO_JSON_QUALIDADE}`;
+
+// Enxuga o material enviado à IA: menos conversas e menos mensagens por
+// conversa. Isso reduz drasticamente o "trabalho" do modelo — a principal
+// causa do estouro de max_tokens era mandar conversa demais de uma vez.
+function compactarConversas(conversas) {
+  const LIMITE_CONVERSAS = 18;   // no máx N conversas mais recentes
+  const LIMITE_MENSAGENS = 20;   // últimas N mensagens de cada conversa
+  const MAX_CHARS_MSG = 280;     // trunca mensagem gigante
+  const ORCAMENTO_CHARS = 18000; // teto total do material (~4,5k tokens)
+
+  const out = [];
+  let acumulado = 0;
+  for (const c of conversas.slice(0, LIMITE_CONVERSAS)) {
+    if (acumulado >= ORCAMENTO_CHARS) break;
+    const msgs = (c.mensagens || []).slice(-LIMITE_MENSAGENS).map((m) => ({
+      ...m,
+      texto: m.texto ? String(m.texto).slice(0, MAX_CHARS_MSG) : m.texto,
+    }));
+    if (msgs.length === 0) continue;
+    out.push({ lead: c.lead, mensagens: msgs });
+    acumulado += msgs.reduce((s, m) => s + ((m.texto || '').length) + 24, 0) + 80;
+  }
+  return out;
+}
+
+function montarUserMsgQualidade(conversas, periodo, instrucao) {
+  const foco = instrucao && String(instrucao).trim()
+    ? `\n\nFOCO ADICIONAL PEDIDO PELA GESTÃO (dê ênfase a isto no texto humano, mas SEM deixar de preencher o bloco de métricas completo): ${String(instrucao).trim()}`
+    : '';
+  return `Período analisado: de ${periodo.de} até ${periodo.ate}.${foco}\n\n===== CONVERSAS DO SETOR (${conversas.length}) =====\n\n` +
+    conversas
+      .map(({ lead, mensagens }) => {
+        const dono = lead.vendedor_nome || 'sem atendente definido';
+        const situacao = lead.status === 'encerrado' ? 'encerrada' : 'ativa';
+        return `=== Conversa com ${lead.nome_cliente || lead.telefone} (${situacao}; Atendente responsável: ${dono}) ===\n${transcricaoQualidade(mensagens)}`;
+      })
+      .join('\n\n');
+}
+
 // Gera a curadoria de qualidade (por vendedor). conversas: [{lead, mensagens}],
 // onde lead.vendedor_nome traz o nome do atendente responsável (resolvido por
 // quem chama). opts: { setor, instrucao?, periodo? }.
@@ -406,38 +454,39 @@ async function analisarQualidade(conversas, opts = {}) {
   if (!configurado) return { erro: 'IA não configurada (falta ANTHROPIC_API_KEY no servidor).' };
   if (!conversas || conversas.length === 0) return { erro: 'nenhuma conversa com mensagens pra analisar nesse setor.' };
 
+  const enxutas = compactarConversas(conversas);
+  if (enxutas.length === 0) return { erro: 'nenhuma conversa com mensagens pra analisar nesse setor.' };
+
   const system = setor === 'financeiro' ? PROMPT_QUALIDADE_FINANCEIRO : PROMPT_QUALIDADE_VENDAS;
-  const periodo = opts.periodo || calcularPeriodoConversas(conversas);
-  const foco = opts.instrucao && String(opts.instrucao).trim()
-    ? `\n\nFOCO ADICIONAL PEDIDO PELA GESTÃO (dê ênfase a isto na PARTE 1, mas SEM deixar de preencher a PARTE 2 completa): ${String(opts.instrucao).trim()}`
-    : '';
+  const periodo = opts.periodo || calcularPeriodoConversas(enxutas);
+  const userMsg = montarUserMsgQualidade(enxutas, periodo, opts.instrucao);
 
-  const userMsg = `Período analisado: de ${periodo.de} até ${periodo.ate}.${foco}\n\n===== CONVERSAS DO SETOR (${conversas.length}) =====\n\n` +
-    conversas
-      .map(({ lead, mensagens }) => {
-        const dono = lead.vendedor_nome || 'sem atendente definido';
-        const situacao = lead.status === 'encerrado' ? 'encerrada' : 'ativa';
-        return `=== Conversa com ${lead.nome_cliente || lead.telefone} (${situacao}; Atendente responsável: ${dono}) ===\n${transcricaoQualidade(mensagens)}`;
-      })
-      .join('\n\n');
-
-  // Precisa de espaço pra escrever o texto E o JSON — orçamento generoso, com
-  // as mesmas redes de segurança da análise sob medida (retry / cai pra 4000).
-  // 8000 é o teto que já sabemos que passa (mesmo valor da análise sob medida):
-  // com 6000 o modelo estourava o orçamento antes de escrever (motivo max_tokens).
+  // 1ª tentativa: relatório completo (métricas primeiro + texto), 8000 tokens.
+  // 8000 é o teto que este modelo aceita; passar disso ele recusa.
   let r = await chamarClaudeComMotivo(system, userMsg, 8000);
-  if (r.semTexto) {
-    r = await chamarClaudeComMotivo(system, userMsg, 8000);
-  }
-  if (r.semTexto) {
-    r = await chamarClaudeComMotivo(system, userMsg, 8000);
-  } else if (!r.texto && /max_tokens/i.test(r.erro || '')) {
-    r = await chamarClaudeComMotivo(system, userMsg, 4000);
-  }
-  if (!r.texto) return { erro: r.erro || 'a IA não conseguiu gerar a análise agora — tenta de novo em instantes.' };
+  if (r.semTexto) r = await chamarClaudeComMotivo(system, userMsg, 8000); // 1 retry (varia entre chamadas)
 
-  const { conteudo, metricas } = extrairMetricas(r.texto);
-  return { conteudo: conteudo || r.texto, metricas, periodo };
+  if (r.texto) {
+    const { conteudo, metricas } = extrairMetricas(r.texto);
+    return { conteudo: conteudo || r.texto, metricas, periodo };
+  }
+
+  // Fallback: se o completo não coube, pede SÓ as métricas (resposta curta) —
+  // assim o dashboard recebe os números mesmo quando o texto não cabe.
+  const systemMet = setor === 'financeiro' ? PROMPT_METRICAS_FINANCEIRO : PROMPT_METRICAS_VENDAS;
+  const rm = await chamarClaudeComMotivo(systemMet, userMsg, 4000);
+  if (rm.texto) {
+    const { metricas } = extrairMetricas(rm.texto);
+    if (metricas) {
+      return {
+        conteudo: 'Resumo em texto indisponível nesta rodada (a resposta ficaria longa demais para o limite do modelo). As métricas foram geradas normalmente e estão no painel.',
+        metricas,
+        periodo,
+      };
+    }
+  }
+
+  return { erro: r.erro || 'a IA não conseguiu gerar a análise agora — tenta de novo em instantes.' };
 }
 
 module.exports = { processarNovaMensagem, analisarConversa, sugerirTarefa, analisarDiaria, analisarFinanceiroDiario, analisarPersonalizado, analisarQualidade, configurado };
