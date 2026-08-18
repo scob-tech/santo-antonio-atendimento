@@ -275,7 +275,12 @@ Priorize os casos MAIS relevantes e agrupe por tema, em vez de listar exaustivam
 // vocabulário da parte de leitura humana: no Financeiro "orçamento" vira
 // "proposta/negociação de cobrança" e "motivos" viram "objeções de cobrança".
 
-const BLOCO_JSON_QUALIDADE = `PARTE 2 — Bloco de dados entre os marcadores exatos abaixo, em JSON válido:
+// Regra de ordem/tamanho: o bloco de métricas vem PRIMEIRO (assim nunca é
+// cortado se a resposta ficar longa) e o texto humano vem depois, objetivo —
+// evita o erro "max_tokens" com o JSON perdido no meio de um texto gigante.
+const REGRA_TAMANHO_QUALIDADE = `IMPORTANTE: escreva SEMPRE o bloco de métricas (entre <<<METRICAS_JSON>>> e <<<FIM_METRICAS>>>) PRIMEIRO e completo — ele é OBRIGATÓRIO e nunca pode ser cortado. Só DEPOIS escreva o texto humano, de forma OBJETIVA (no máximo ~15 linhas no total, priorizando os casos mais relevantes) e sempre concluindo.`;
+
+const BLOCO_JSON_QUALIDADE = `BLOCO DE MÉTRICAS — escreva este bloco PRIMEIRO, entre os marcadores exatos abaixo, em JSON válido:
 <<<METRICAS_JSON>>>
 {
   "periodo": {"de":"YYYY-MM-DD","ate":"YYYY-MM-DD"},
@@ -310,9 +315,11 @@ Regras:
 - Limites (SLA): resposta ideal até 5 min; orçamento ideal até 20 min. Acima disso conte como "atraso".
 - Cada conversa traz o "Atendente responsável" no cabeçalho — atribua as métricas por vendedor usando esse nome. Nunca invente um nome que não esteja no material.
 - Se algo não puder ser calculado, escreva "indisponível". NUNCA invente.
-Entregue DUAS partes:
-PARTE 1 — Relatório em texto (leitura humana): resumo, quem vai bem, quem está travando (respondendo devagar, demorando no orçamento, não mandando link/pix) e recomendações.
-${BLOCO_JSON_QUALIDADE}`;
+Entregue DUAS partes, NESTA ORDEM — o bloco de métricas PRIMEIRO, o texto humano depois:
+${BLOCO_JSON_QUALIDADE}
+
+Depois do bloco acima, escreva o RELATÓRIO EM TEXTO (leitura humana), objetivo: resumo, quem vai bem, quem está travando (respondendo devagar, demorando no orçamento, não mandando link/pix) e recomendações.
+${REGRA_TAMANHO_QUALIDADE}`;
 
 const PROMPT_QUALIDADE_FINANCEIRO = `Você é um analista de qualidade de atendimento do setor Financeiro (cobrança e negociação de pagamentos). Analise as conversas de WhatsApp do período e produza um relatório de DESEMPENHO POR ATENDENTE, focado em tempo e no encaminhamento da negociação de cobrança.
 Regras:
@@ -323,13 +330,16 @@ Regras:
 - Cada conversa traz o "Atendente responsável" no cabeçalho — atribua as métricas por atendente usando esse nome. Nunca invente um nome que não esteja no material.
 - Em "motivos", liste as OBJEÇÕES DE COBRANÇA mais comuns (por que o cliente não fecha o acordo/pagamento).
 - Se algo não puder ser calculado, escreva "indisponível". NUNCA invente.
-Entregue DUAS partes:
-PARTE 1 — Relatório em texto (leitura humana): resumo, quem vai bem, quem está travando (respondendo devagar, demorando na proposta de cobrança, não mandando link/pix) e recomendações.
-${BLOCO_JSON_QUALIDADE}`;
+Entregue DUAS partes, NESTA ORDEM — o bloco de métricas PRIMEIRO, o texto humano depois:
+${BLOCO_JSON_QUALIDADE}
 
-// Separa o texto humano (PARTE 1) do bloco de métricas (PARTE 2). Devolve o
-// conteudo já SEM os marcadores (pra não vazar na tela) e as métricas já
-// parseadas (ou null se o modelo não produziu / veio inválido).
+Depois do bloco acima, escreva o RELATÓRIO EM TEXTO (leitura humana), objetivo: resumo, quem vai bem, quem está travando (respondendo devagar, demorando na proposta de cobrança, não mandando link/pix) e recomendações.
+${REGRA_TAMANHO_QUALIDADE}`;
+
+// Separa o bloco de métricas (JSON entre marcadores) do texto humano. Funciona
+// com o bloco em QUALQUER posição — hoje o prompt pede o bloco PRIMEIRO, mas o
+// parser não depende disso. Devolve o conteudo já SEM os marcadores (pra não
+// vazar na tela) e as métricas parseadas (ou null se não veio / veio inválido).
 function extrairMetricas(texto) {
   if (!texto) return { conteudo: '', metricas: null };
   const re = /<<<METRICAS_JSON>>>([\s\S]*?)<<<FIM_METRICAS>>>/;
@@ -338,11 +348,21 @@ function extrairMetricas(texto) {
   if (m) {
     try { metricas = JSON.parse(m[1].replace(/```json|```/g, '').trim()); } catch { metricas = null; }
   }
-  // Remove o bloco inteiro (fechado). Se por acaso veio só o marcador de
-  // abertura sem o de fechamento, corta dali pra frente também.
-  let conteudo = texto.replace(re, '').replace(/<<<METRICAS_JSON>>>[\s\S]*$/, '');
-  conteudo = conteudo.replace(/PARTE\s*2\s*—.*$/is, '').trim();
-  return { conteudo: conteudo.trim(), metricas };
+  let conteudo = texto;
+  if (m) {
+    conteudo = conteudo.replace(re, '');                         // remove o bloco fechado (onde estiver)
+  } else {
+    conteudo = conteudo.replace(/<<<METRICAS_JSON>>>[\s\S]*$/, ''); // truncado: corta do marcador de abertura
+  }
+  // Tira só os RÓTULOS de seção que possam ter sobrado (sem apagar o corpo do
+  // texto) e qualquer marcador solto, e limpa linhas em branco no começo/fim.
+  conteudo = conteudo
+    .replace(/<<<\/?FIM_METRICAS>>>|<<<METRICAS_JSON>>>/g, '')
+    .replace(/^\s*PARTE\s*\d+\s*[—:.-]\s*/gim, '')
+    .replace(/^\s*(BLOCO DE MÉTRICAS|RELAT[ÓO]RIO EM TEXTO)\b[^\n]*:?\s*$/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return { conteudo, metricas };
 }
 
 // Descobre o intervalo de datas (YYYY-MM-DD) coberto pelas conversas, pra
@@ -403,9 +423,14 @@ async function analisarQualidade(conversas, opts = {}) {
 
   // Precisa de espaço pra escrever o texto E o JSON — orçamento generoso, com
   // as mesmas redes de segurança da análise sob medida (retry / cai pra 4000).
-  let r = await chamarClaudeComMotivo(system, userMsg, 6000);
+  // 8000 é o teto que já sabemos que passa (mesmo valor da análise sob medida):
+  // com 6000 o modelo estourava o orçamento antes de escrever (motivo max_tokens).
+  let r = await chamarClaudeComMotivo(system, userMsg, 8000);
   if (r.semTexto) {
-    r = await chamarClaudeComMotivo(system, userMsg, 6000);
+    r = await chamarClaudeComMotivo(system, userMsg, 8000);
+  }
+  if (r.semTexto) {
+    r = await chamarClaudeComMotivo(system, userMsg, 8000);
   } else if (!r.texto && /max_tokens/i.test(r.erro || '')) {
     r = await chamarClaudeComMotivo(system, userMsg, 4000);
   }
