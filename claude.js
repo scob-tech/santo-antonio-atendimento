@@ -98,6 +98,28 @@ async function chamarClaudeComMotivo(system, mensagemUsuario, maxTokens = 400) {
   }
 }
 
+// Chama a IA pedindo o MAIOR teto de tokens que o modelo aceitar. Tenta o teto
+// mais alto primeiro; se a API RECUSAR o valor por ser alto demais pra esse
+// modelo (erro citando max_tokens/maximum), tenta o próximo menor. Assim o
+// relatório usa toda a folga que o modelo permite, sem a gente precisar
+// adivinhar o número exato — e nunca falha só por ter chutado um teto errado.
+// (Um 200 truncado NÃO faz reduzir: nesse caso o teto já é o máximo e reduzir
+// só pioraria; devolvemos como está.)
+async function chamarComTetoAlto(system, userMsg, tetos = [32000, 16000, 8000, 4000]) {
+  let ultimo = { texto: null, erro: 'nenhuma tentativa realizada' };
+  for (const teto of tetos) {
+    const r = await chamarClaudeComMotivo(system, userMsg, teto);
+    ultimo = r;
+    const recusaDeTeto = !r.texto && !r.semTexto && /max_tokens|max.?output|output token|too large|exceed|maximum|allowed|greater than/i.test(r.erro || '');
+    if (recusaDeTeto) {
+      console.log(`>> Teto ${teto} recusado pelo modelo — tentando um menor.`);
+      continue;
+    }
+    return r; // sucesso, ou 200-truncado (semTexto), ou outro erro que reduzir não resolve
+  }
+  return ultimo;
+}
+
 function extrairJSON(texto) {
   if (!texto) return null;
   try {
@@ -488,14 +510,14 @@ async function analisarQualidade(conversas, opts = {}) {
   const periodo = opts.periodo || calcularPeriodoConversas(enxutas);
   const userMsg = montarUserMsgQualidade(enxutas, periodo, opts.instrucao);
 
-  // ESTRATÉGIA EM DUAS CHAMADAS (mais confiável que uma só):
-  // 1) MÉTRICAS primeiro — objetivo principal (alimenta o dashboard). Saída
-  //    pequena e delimitada; com 8000 tokens de teto, cabe folgado mesmo se o
-  //    modelo "pensar" bastante. Pedir texto + JSON juntos era o que estourava.
+  // ESTRATÉGIA EM DUAS CHAMADAS (mais confiável que uma só), cada uma pedindo
+  // o MAIOR teto de tokens que o modelo aceitar (auto-descoberto):
+  // 1) MÉTRICAS primeiro — objetivo principal (alimenta o dashboard). Com muito
+  //    espaço de saída, o JSON completa mesmo que o modelo "pense" bastante.
   const systemMet = setor === 'financeiro' ? PROMPT_METRICAS_FINANCEIRO : PROMPT_METRICAS_VENDAS;
-  let rm = await chamarClaudeComMotivo(systemMet, userMsg, 8000);
+  let rm = await chamarComTetoAlto(systemMet, userMsg, [32000, 16000, 8000, 4000]);
   if (!extrairMetricas(rm.texto || '').metricas) {
-    rm = await chamarClaudeComMotivo(systemMet, userMsg, 8000); // 1 retry
+    rm = await chamarComTetoAlto(systemMet, userMsg, [16000, 8000, 4000]); // 1 retry
   }
   const metricas = extrairMetricas(rm.texto || '').metricas;
   if (!metricas) {
@@ -511,8 +533,7 @@ async function analisarQualidade(conversas, opts = {}) {
     ? `\n\nFoco pedido pela gestão: ${String(opts.instrucao).trim()}`
     : '';
   const msgTxt = `Período: de ${periodo.de} até ${periodo.ate}.${foco}\n\nMÉTRICAS (JSON) já calculadas:\n${JSON.stringify(metricas)}`;
-  let rt = await chamarClaudeComMotivo(systemTxt, msgTxt, 2500);
-  if (rt.semTexto) rt = await chamarClaudeComMotivo(systemTxt, msgTxt, 2500);
+  const rt = await chamarComTetoAlto(systemTxt, msgTxt, [16000, 8000, 4000]);
   const conteudo = rt.texto
     ? (extrairMetricas(rt.texto).conteudo || rt.texto.trim())
     : 'As métricas foram geradas e estão no painel. (O resumo em texto não pôde ser gerado nesta rodada — tente novamente se quiser o texto.)';
