@@ -32,6 +32,7 @@ function urlMidiaSegura(url) {
 let usuarioAtual = null;
 let leadsCache = [];
 let conversasAtivasCache = [];
+let conversasRecentesCache = [];
 let vendedoresCache = [];
 // Setor que está sendo exibido no momento (Vendas, Financeiro, Expedição).
 // A maioria das contas só tem 1 setor mesmo — isso só vira um seletor de
@@ -54,9 +55,12 @@ function fecharModal(id) {
   // Ao fechar a conversa, esquece qual estava aberta — assim nenhuma
   // atualização de rede atrasada pinta uma conversa "fantasma" por cima depois.
   if (id === 'modal-conversa') leadConversaIdAlvo = null;
+  if (id === 'modal-conversa') aoMudarConversaAberta();
 }
 function abrirModal(id) {
   document.getElementById(id).classList.add('aberto');
+  // A conversa agora é o painel fixo da Central de Atendimento (inbox-ui.js).
+  if (id === 'modal-conversa') aoMudarConversaAberta();
 }
 function ehGestor(usuario) {
   return usuario && (usuario.role === 'admin' || usuario.role === 'supervisor');
@@ -125,13 +129,15 @@ function atualizarPainelTitulo() {
   const acoesEl = document.getElementById('painel-acoes-admin');
   if (!el || !usuarioAtual) return;
   const nome = NOMES_SETOR[setorAtivo];
+  const setorTopo = document.getElementById('topbar-setor');
+  if (setorTopo) setorTopo.textContent = nome || '';
 
   if (ehGestor(usuarioAtual)) {
     el.textContent = nome ? `Painel de ${nome}` : 'Painel';
     subEl.textContent = 'Visão geral de todos os atendimentos.';
     acoesEl.style.display = 'flex';
   } else {
-    el.textContent = `${saudacaoPorHorario()}, ${usuarioAtual.nome.split(' ')[0]}! 👋`;
+    el.textContent = `${saudacaoPorHorario()}, ${usuarioAtual.nome.split(' ')[0]}`;
     subEl.textContent = 'Vamos juntos fazer mais um dia incrível de conquistas.';
     acoesEl.style.display = 'none';
   }
@@ -150,7 +156,7 @@ function atualizarPainelTitulo() {
   // equipe), igual pros 3 setores — não precisa mais trocar o rótulo
   // dependendo do setor como antes.
   const labelClientes = document.getElementById('nav-clientes-label');
-  if (labelClientes) labelClientes.textContent = 'Contatos';
+  if (labelClientes) labelClientes.textContent = 'Clientes';
 }
 
 function mudarSetor(slug) {
@@ -173,7 +179,7 @@ function mudarSetor(slug) {
 // não recarrega dado nenhum. Hoje só "Início" tem conteúdo de verdade;
 // as outras são placeholders até ganharem tela própria.
 const TITULOS_VIEW = {
-  inicio: 'Início',
+  inicio: 'Central de Atendimento',
   agenda: 'Agenda',
   clientes: 'Clientes',
   historico: 'Histórico',
@@ -181,6 +187,8 @@ const TITULOS_VIEW = {
   configuracoes: 'Configurações',
 };
 function mudarView(nome) {
+  document.body.dataset.view = nome; // o layout inbox da Tela Inicial depende disso (scob.css)
+  posicionarPainelConversa(nome); // a conversa fica fixa no Atendimento ou no Histórico (historico-ui.js)
   document.querySelectorAll('.view').forEach((el) => { el.hidden = el.id !== `view-${nome}`; });
   document.querySelectorAll('.side-item').forEach((btn) => {
     btn.classList.toggle('is-active', btn.dataset.view === nome);
@@ -188,6 +196,7 @@ function mudarView(nome) {
   document.getElementById('view-title').textContent = TITULOS_VIEW[nome] || '';
   if (nome === 'progresso') carregarProgresso();
   if (nome === 'clientes') carregarContatos();
+  if (nome === 'configuracoes') atualizarBotaoNotificacoes(); // switch de push reflete a inscrição real deste navegador
   fecharMenuMobile();
 }
 
@@ -205,24 +214,8 @@ async function carregarContatos(termoBusca) {
   if (res.status === 401) return window.location.href = '/login.html';
   if (!res.ok) return;
   const contatos = await res.json();
-
-  document.getElementById('contatos-titulo').textContent = `Contatos (${contatos.length})`;
-
-  el.innerHTML = contatos.length > 0
-    ? contatos.map((c) => {
-      const nomeEsc = escapeHtml(c.nome).replace(/'/g, "\\'");
-      return `
-      <li class="conv-item" onclick="abrirConversaPorTelefone('${c.telefone}', '${nomeEsc}')">
-        <div class="conv-avatar" style="background:${corAvatar(c.id)};">${escapeHtml(iniciais(c.nome))}</div>
-        <div class="conv-main">
-          <div class="conv-name">${escapeHtml(c.nome)}</div>
-          <p class="conv-preview">${escapeHtml(c.telefone)}</p>
-        </div>
-        <button class="link-mini" title="Editar contato" style="flex-shrink:0; padding:6px;"
-          onclick="event.stopPropagation(); abrirEditarContato(${c.id}, '${nomeEsc}', '${c.telefone}')">✏️</button>
-      </li>
-    `; }).join('')
-    : `<li class="empty-state" style="padding:14px; font-size:12px;">${termoBusca ? 'Nenhum contato encontrado.' : 'Nenhum contato salvo ainda. Use "Salvar contato" numa conversa, ou "+ Criar Contato" na tela de Início.'}</li>`;
+  // Tabela, indicadores, filtros e painel lateral: clientes-ui.js
+  renderizarClientes(contatos, termoBusca);
 }
 
 // Editar contato salvo — trocar nome e/ou número.
@@ -343,7 +336,7 @@ async function carregarNovaConversaResultados(termo) {
   if (dig.length >= 10 && !jaTemNumero) {
     html += `
       <li class="conv-item" onclick="iniciarConversaNova('${escapeHtml(dig)}','')">
-        <div class="conv-avatar" style="background:var(--navy); color:#fff;">✏️</div>
+        <div class="conv-avatar" style="background:var(--navy); color:#fff;">${icone('message-square-plus', 16)}</div>
         <div class="conv-main">
           <div class="conv-name">Iniciar conversa com ${escapeHtml(dig)}</div>
           <p class="conv-preview">Número novo — nunca conversou aqui</p>
@@ -390,9 +383,9 @@ async function salvarContatoCompartilhado(botao, telefone, nome) {
       body: JSON.stringify({ telefone, nome: nome || telefone }),
     });
     if (!res.ok) throw new Error('falhou');
-    if (botao) { botao.textContent = '✓ Contato salvo'; botao.style.opacity = '.7'; botao.style.cursor = 'default'; }
+    if (botao) { botao.textContent = 'Contato salvo'; botao.style.opacity = '.7'; botao.style.cursor = 'default'; }
   } catch (e) {
-    if (botao) { botao.disabled = false; botao.textContent = textoOriginal || '💾 Salvar contato'; }
+    if (botao) { botao.disabled = false; botao.textContent = textoOriginal || 'Salvar contato'; }
     alert('Não consegui salvar o contato agora. Tenta de novo em instantes.');
   }
 }
@@ -494,7 +487,7 @@ async function carregarProgresso() {
 
 function renderizarUserBox() {
   const el = document.getElementById('user-box');
-  const rotulos = { admin: 'Admin', supervisor: 'Supervisor', vendedor: 'Vendedor' };
+  const rotulos = { admin: 'Admin', supervisor: 'Supervisor', vendedor: 'Atendente' };
   const iniciaisUsuario = iniciais(usuarioAtual.nome);
 
   el.innerHTML = `
@@ -502,16 +495,16 @@ function renderizarUserBox() {
       <div class="avatar">${escapeHtml(iniciaisUsuario)}</div>
       <div class="user-text">
         <span class="user-name">${escapeHtml(usuarioAtual.nome)}</span>
-        <span class="user-role">${rotulos[usuarioAtual.role] || 'Vendedor'}</span>
+        <span class="user-role">${rotulos[usuarioAtual.role] || 'Atendente'}</span>
       </div>
-      <span class="chevron">▾</span>
+      <span class="chevron">${icone('chevron-down', 16)}</span>
       <div class="user-dropdown" id="user-dropdown" hidden>
-        <button class="user-dropdown-item" onclick="event.stopPropagation(); document.getElementById('user-dropdown').hidden = true; mudarView('configuracoes');" style="display:flex; align-items:center; gap:8px;">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" fill="none"/></svg>
-          Configurações
+        <div class="user-dropdown-head"><strong>${escapeHtml(usuarioAtual.nome)}</strong><span>${rotulos[usuarioAtual.role] || 'Atendente'}</span></div>
+        <button class="user-dropdown-item" onclick="event.stopPropagation(); document.getElementById('user-dropdown').hidden = true; mudarView('configuracoes');">
+          ${icone('settings', 16)} Configurações
         </button>
         <div class="user-dropdown-divider"></div>
-        <button class="user-dropdown-item user-dropdown-item--danger" onclick="sair()">🚪 Sair</button>
+        <button class="user-dropdown-item user-dropdown-item--danger" onclick="sair()">${icone('log-out', 16)} Sair</button>
       </div>
     </div>
   `;
@@ -520,13 +513,14 @@ function renderizarUserBox() {
   const btnCadastro = document.getElementById('btn-toggle-cadastro');
   if (usuarioAtual.role === 'admin') {
     document.getElementById('painel-vendedores').style.display = 'block';
-    document.getElementById('config-metas').style.display = 'block';
-    popularSelectVendedoresMetas();
+    // Metas é conceito de Vendas — nas outras instalações o card nem aparece.
+    if (setorAtivo === 'vendas') {
+      document.getElementById('config-metas').style.display = 'block';
+      popularSelectVendedoresMetas();
+    }
     renderizarCheckboxesSetores();
     btnCadastro.style.display = 'inline-block';
-    btnCadastro.onclick = () => {
-      document.getElementById('cadastro-form').classList.toggle('aberto');
-    };
+    btnCadastro.onclick = abrirCadastroUsuario; // drawer lateral (configuracoes-ui.js)
   }
   if (usuarioAtual.role === 'admin') {
     document.getElementById('btn-rodar-analise').style.display = 'inline-block';
@@ -544,27 +538,9 @@ function renderizarUserBox() {
   }
 }
 
-// Card "Cadastros" da tela de Configurações — conteúdo muda conforme o
-// papel. Cadastro de vendedor continua exclusivo de admin (o formulário
-// de verdade fica na seção "Equipe", abaixo); cadastro de clientes ainda
-// não existe como tela própria — quando existir, entra aqui pro vendedor.
+// "Sessão atual" no módulo Segurança da tela de Configurações.
 function renderizarConfiguracoes() {
-  const el = document.getElementById('config-cadastros');
-  if (!el) return;
-  if (usuarioAtual.role === 'admin') {
-    el.innerHTML = `
-      <h3>Cadastros</h3>
-      <p>Cadastro de funcionários — apenas administradores podem contratar/dar acesso a alguém novo.</p>
-      <button class="btn-primary btn-small" style="width:100%;" onclick="document.getElementById('painel-vendedores').scrollIntoView({behavior:'smooth'}); document.getElementById('cadastro-form').classList.add('aberto');">+ Cadastrar funcionário</button>
-      <p style="font-size:11.5px; color:var(--muted); margin-top:10px; margin-bottom:0;">A lista da equipe fica logo abaixo, nessa mesma tela. Clientes, fornecedores e parceiros são cadastrados como contato (+ Criar Contato, na tela de Início), não aqui.</p>
-    `;
-  } else {
-    el.innerHTML = `
-      <h3>Cadastros</h3>
-      <p>Cadastro de funcionários — apenas administradores podem contratar/dar acesso a alguém novo.</p>
-      <p style="font-size:12.5px; color:var(--muted); margin-top:10px; margin-bottom:0;">Pra registrar cliente, fornecedor ou parceiro novo, use "+ Criar Contato" na tela de Início.</p>
-    `;
-  }
+  renderizarSessaoConfig();
 }
 
 // Tema claro/escuro — só visual, guardado no navegador (não é por conta,
@@ -634,7 +610,7 @@ async function popularSelectVendedoresMetas() {
   select.innerHTML = '<option value="">Selecione um vendedor...</option>' +
     doSetor.map((v) => `<option value="${v.id}">${escapeHtml(v.nome)}</option>`).join('');
   select.dataset.carregado = setorAtivo;
-  document.getElementById('config-metas').style.display = doSetor.length > 0 ? 'block' : 'none';
+  document.getElementById('config-metas').style.display = setorAtivo === 'vendas' && doSetor.length > 0 ? 'block' : 'none';
 }
 
 async function carregarMetaParaEdicao() {
@@ -737,10 +713,10 @@ async function carregarMinhaMeta() {
   card.style.display = 'block';
   heroRow.className = 'hero-row';
 
-  document.getElementById('meta-titulo').textContent = `🎯 SUA META DA ${data.meta.periodo === 'mes' ? 'MÊS' : 'SEMANA'}`;
+  document.getElementById('meta-titulo').textContent = `Sua meta ${data.meta.periodo === 'mes' ? 'do mês' : 'da semana'} · ${data.percentual}%`;
   document.getElementById('meta-numeros').textContent = `${cfg.formatar(data.atual)} / ${cfg.formatar(data.meta.valor_meta)}`;
   document.getElementById('meta-falta').innerHTML = bateu
-    ? '🎉 Meta batida — mandou bem!'
+    ? 'Meta batida — mandou bem!'
     : `Faltam <b>${cfg.formatar(data.falta)}</b> pra você bater sua meta!`;
 
   const fill = document.getElementById('meta-barra-fill');
@@ -755,7 +731,7 @@ async function carregarMinhaMeta() {
   document.getElementById('meta-ring-texto').textContent = `${data.percentual}%`;
 
   document.getElementById('meta-mini-conquistado').textContent = cfg.formatar(data.atual);
-  document.getElementById('meta-mini-faltam').textContent = bateu ? '🎉' : cfg.formatar(data.falta);
+  document.getElementById('meta-mini-faltam').textContent = bateu ? 'Batida' : cfg.formatar(data.falta);
   document.getElementById('meta-mini-dias').textContent = data.diasRestantes === 0 ? 'Último dia!' : `${data.diasRestantes} dias`;
 
   celebra.style.display = bateu ? 'block' : 'none';
@@ -880,13 +856,13 @@ async function confirmarRedefinirSenha() {
 async function rodarAnaliseDiariaAgora() {
   const btn = document.getElementById('btn-rodar-analise');
   btn.disabled = true;
-  btn.textContent = '🤖 Rodando...';
+  btn.innerHTML = `${icone('bot', 16)}<span class="btn-label">Rodando...</span>`;
 
   if (setorAtivo === 'financeiro') {
     const res = await fetch(`${API}/api/relatorios-financeiro/gerar-agora?setor=financeiro`, { method: 'POST' });
     const resultado = await res.json();
     btn.disabled = false;
-    btn.textContent = '🤖 Gerar Análise';
+    btn.innerHTML = `${icone('bot', 16)}<span class="btn-label">Gerar análise</span>`;
     if (!res.ok) {
       alert(resultado.erro || 'Não rodou.');
       return;
@@ -899,7 +875,7 @@ async function rodarAnaliseDiariaAgora() {
   const resultado = await res.json();
 
   btn.disabled = false;
-  btn.textContent = '🤖 Rodar análise diária';
+  btn.innerHTML = `${icone('bot', 16)}<span class="btn-label">Rodar análise diária</span>`;
 
   if (!res.ok || !resultado.rodou) {
     alert(resultado.erro || (resultado.motivo === 'ia_nao_configurada' ? 'IA não configurada ainda nesse servidor.' : 'Não rodou.'));
@@ -923,7 +899,7 @@ async function rodarAnalisePersonalizada() {
   }
   const btn = document.getElementById('btn-analise-custom');
   btn.disabled = true;
-  btn.textContent = '🔎 Analisando...';
+  btn.textContent = 'Analisando...';
   try {
     const res = await fetch(`${API}/api/analise-personalizada?setor=${setorAtivo}`, {
       method: 'POST',
@@ -944,7 +920,7 @@ async function rodarAnalisePersonalizada() {
     alert('Erro de rede ao gerar a análise. Confere a conexão e tenta de novo.');
   } finally {
     btn.disabled = false;
-    btn.textContent = '🔎 Analisar';
+    btn.textContent = 'Analisar';
   }
 }
 
@@ -1072,8 +1048,10 @@ function fmtBytes(b) {
 // backup automático todo dia; este botão é pra quando você quiser um agora.
 async function baixarBackup() {
   const btn = document.getElementById('btn-backup');
-  const rotulo = btn ? btn.textContent : '';
-  if (btn) { btn.disabled = true; btn.textContent = '💾 Gerando…'; }
+  const statusEl = document.getElementById('backup-status');
+  const rotulo = statusEl ? statusEl.textContent : '';
+  if (btn) { btn.disabled = true; btn.classList.add('is-loading'); }
+  if (statusEl) statusEl.textContent = 'Gerando backup…';
   try {
     const res = await fetch(`${API}/api/admin/backup`);
     if (!res.ok) {
@@ -1093,7 +1071,8 @@ async function baixarBackup() {
   } catch (e) {
     alert('Não deu pra baixar o backup: ' + e.message);
   } finally {
-    if (btn) { btn.disabled = false; btn.textContent = rotulo; }
+    if (btn) { btn.disabled = false; btn.classList.remove('is-loading'); }
+    if (statusEl) statusEl.textContent = rotulo;
   }
 }
 
@@ -1172,7 +1151,7 @@ function copiarAnaliseCustom() {
   const txt = document.getElementById('analise-custom-conteudo').textContent || '';
   const btn = document.getElementById('btn-copiar-analise-custom');
   if (!txt) return;
-  const feedback = () => { if (btn) { btn.textContent = '✅ Copiado'; setTimeout(() => { btn.textContent = '📋 Copiar'; }, 1500); } };
+  const feedback = () => { if (btn) { btn.textContent = 'Copiado'; setTimeout(() => { btn.textContent = 'Copiar'; }, 1500); } };
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(txt).then(feedback, () => {});
   }
@@ -1248,7 +1227,7 @@ async function cadastrarVendedor() {
   const data = await res.json();
 
   if (res.ok) {
-    msgEl.textContent = `Vendedor "${nome}" cadastrado. Passe o login e a senha pra ele.`;
+    msgEl.textContent = `Usuário "${nome}" cadastrado. Passe o login e a senha para a pessoa.`;
     msgEl.className = 'msg ok';
     document.getElementById('c-nome').value = '';
     document.getElementById('c-login').value = '';
@@ -1265,17 +1244,7 @@ async function carregarVendedores() {
   if (res.status === 401) return window.location.href = '/login.html';
   const vendedores = await res.json();
   vendedoresCache = vendedores;
-  const el = document.getElementById('vendedores');
-  const ehAdmin = usuarioAtual && usuarioAtual.role === 'admin';
-  el.innerHTML = vendedores.map(v => `
-    <div class="side-card">
-      <div class="vendedor-name" style="display:flex; justify-content:space-between; align-items:center;">
-        <span>${v.nome}${v.role === 'admin' ? ' 👑' : v.role === 'supervisor' ? ' 🛡️' : ''}</span>
-        ${ehAdmin ? `<span style="display:flex; gap:8px;"><button class="link-mini" onclick="abrirEdicaoCadastro(${v.id})">✏️</button><button class="link-mini" onclick="abrirModalSenha(${v.id}, '${v.nome.replace(/'/g, "\\'")}')">🔑</button><button class="link-mini" style="color:var(--red);" onclick="excluirVendedor(${v.id}, '${v.nome.replace(/'/g, "\\'")}')">🗑️</button></span>` : ''}
-      </div>
-      <div class="vendedor-count">${v.leads_ativos} atendimento${v.leads_ativos === 1 ? '' : 's'} ativo${v.leads_ativos === 1 ? '' : 's'}</div>
-    </div>
-  `).join('');
+  renderizarUsuariosConfig(vendedores); // tabela de usuários (configuracoes-ui.js)
   return vendedores;
 }
 
@@ -1297,12 +1266,14 @@ async function carregarLeads() {
   if (res.status === 401) return window.location.href = '/login.html';
   const leads = await res.json();
   leadsCache = leads;
+  atualizarIndicadoresInicio();
   const el = document.getElementById('leads');
   const contagemEl = document.getElementById('leads-count');
   if (contagemEl) contagemEl.textContent = leads.length;
 
   if (leads.length === 0) {
-    el.innerHTML = `<li class="empty-state">Nenhum lead novo esperando. Assim que uma mensagem chegar no WhatsApp, aparece aqui.</li>`;
+    const vazio = `<li class="empty-state">Nenhum lead novo esperando. Assim que uma mensagem chegar no WhatsApp, aparece aqui.</li>`;
+    if (el.innerHTML !== vazio) el.innerHTML = vazio;
     return;
   }
 
@@ -1313,7 +1284,7 @@ async function carregarLeads() {
     && conversasAtivasCache.filter((l) => l.vendedor_id === usuarioAtual.id).length >= 5;
 
   const avisoLimite = noLimite
-    ? `<li class="empty-state" style="background:var(--orange-bg); color:var(--text); border-radius:8px; margin-bottom:8px;">⚠️ Você está com 5 conversas ativas — feche alguma antes de pegar um novo lead.</li>`
+    ? `<li class="inbox-alert">${icone('triangle-alert', 16)}<span>Você está com 5 conversas ativas — feche alguma antes de pegar um novo lead.</span></li>`
     : '';
 
   // Ordenados por quem chegou primeiro
@@ -1343,18 +1314,18 @@ async function carregarLeads() {
     else { const dias = Math.floor(minutosEsperando / (60 * 24)); tempoTexto = `${dias} dia${dias === 1 ? '' : 's'}`; }
 
     const tags = [l.interesse, l.origem && l.origem !== 'geral' ? l.origem : null].filter(Boolean);
-    const tagsHtml = tags.length ? `<div class="lead-tags">${tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>` : '';
+    const tagsHtml = tags.map((t) => `<span class="ui-badge">${escapeHtml(t)}</span>`).join('');
 
     return `
-      <li class="lead-item ${noLimite ? 'lead-item--bloqueado' : ''}" data-id="${l.id}" onclick="${noLimite ? '' : `abrirConversa(${l.id})`}">
+      <li class="lead-item ${noLimite ? 'lead-item--bloqueado' : ''} ${alerta ? 'is-late' : ''}" data-id="${l.id}" onclick="${noLimite ? '' : `abrirConversa(${l.id})`}">
         <div class="lead-avatar">${escapeHtml(iniciais(nome))}</div>
         <div class="lead-main">
-          <div class="lead-top">
+          <div class="item-row">
             <span class="lead-name">${escapeHtml(nome)}</span>
-            <span class="lead-time">${alerta ? '⚠️ ' : ''}há ${tempoTexto}</span>
+            <span class="item-time-late" title="Tempo esperando na fila">${icone('clock', 12)}<span class="lead-time">há ${tempoTexto}</span></span>
           </div>
-          ${tagsHtml}
-          <p class="lead-preview">${escapeHtml(l.primeira_mensagem)}</p>
+          <div class="item-row"><p class="lead-preview">${previewComIcone(l.primeira_mensagem)}</p></div>
+          <div class="item-badges"><span class="ui-badge ui-badge--red ui-badge--dot">Novo</span>${tagsHtml}</div>
         </div>
       </li>
     `;
@@ -1364,7 +1335,7 @@ async function carregarLeads() {
 // Assinaturas do que já está pintado em cada lista — se não mudou, a gente
 // NÃO reconstrói o HTML (era a reconstrução a cada 3s que trocava o item
 // embaixo do dedo e fazia o clique cair no lead errado; e ainda pesava à toa).
-let sigLeads = '', sigConvAtivas = '', sigHistorico = '';
+let sigLeads = '', sigConvAtivas = '';
 
 // Atualiza só o "há X min" de cada lead, sem reconstruir a lista (não quebra clique).
 function atualizarTemposLeads(el, ordenados) {
@@ -1380,7 +1351,9 @@ function atualizarTemposLeads(el, ordenados) {
     if (min < 60) t = `${min} min`;
     else if (min < 60 * 24) t = `${Math.floor(min / 60)} h`;
     else { const d = Math.floor(min / (60 * 24)); t = `${d} dia${d === 1 ? '' : 's'}`; }
-    span.textContent = `${min >= 5 ? '⚠️ ' : ''}há ${t}`;
+    const texto = `há ${t}`;
+    if (span.textContent !== texto) span.textContent = texto;
+    li.classList.toggle('is-late', min >= 5);
   });
 }
 
@@ -1419,17 +1392,17 @@ function renderizarMidia(m) {
     const wrap = 'border:1px solid var(--border); border-radius:12px; padding:10px 12px; margin-bottom:6px; background:var(--card); max-width:260px;';
     if (!tel) {
       // Cartões recebidos ANTES desta atualização não têm o número guardado.
-      return `<div style="${wrap}"><div style="font-weight:700; color:var(--navy);">👤 ${escapeHtml(nome)}</div><div style="font-size:12px; color:var(--muted); margin-top:2px;">Contato compartilhado</div></div>`;
+      return `<div style="${wrap} display:flex; align-items:center; gap:8px;"><span class="midia-contato-icone">${icone('user', 16)}</span><div><div style="font-weight:600; color:var(--text);">${escapeHtml(nome)}</div><div style="font-size:12px; color:var(--muted); margin-top:2px;">Contato compartilhado</div></div></div>`;
     }
     const nomeEsc = escapeHtml(nome).replace(/'/g, "\\'");
     const telEsc = escapeHtml(tel);
     return `<div style="${wrap}">`
-      + `<div style="display:flex; align-items:center; gap:8px;"><span style="font-size:22px;">👤</span>`
-      + `<div style="min-width:0;"><div style="font-weight:700; color:var(--navy); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(nome)}</div>`
+      + `<div style="display:flex; align-items:center; gap:8px;"><span class="midia-contato-icone">${icone('user', 16)}</span>`
+      + `<div style="min-width:0;"><div style="font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(nome)}</div>`
       + `<div style="font-size:12px; color:var(--muted);">${telEsc}</div></div></div>`
       + `<div style="display:flex; gap:6px; margin-top:8px;">`
-      + `<button type="button" onclick="abrirConversaPorTelefone('${telEsc}','${nomeEsc}')" style="flex:1; background:var(--navy); color:#fff; border:none; border-radius:8px; padding:7px 8px; font-size:12px; font-weight:600; cursor:pointer;">💬 Iniciar conversa</button>`
-      + `<button type="button" onclick="salvarContatoCompartilhado(this,'${telEsc}','${nomeEsc}')" style="flex:1; background:var(--card); color:var(--navy); border:1px solid var(--navy); border-radius:8px; padding:7px 8px; font-size:12px; font-weight:600; cursor:pointer;">💾 Salvar contato</button>`
+      + `<button type="button" onclick="abrirConversaPorTelefone('${telEsc}','${nomeEsc}')" style="flex:1; background:var(--navy); color:#fff; border:none; border-radius:8px; padding:7px 8px; font-size:12px; font-weight:600; cursor:pointer;">Iniciar conversa</button>`
+      + `<button type="button" onclick="salvarContatoCompartilhado(this,'${telEsc}','${nomeEsc}')" style="flex:1; background:var(--card); color:var(--navy); border:1px solid var(--navy); border-radius:8px; padding:7px 8px; font-size:12px; font-weight:600; cursor:pointer;">Salvar contato</button>`
       + `</div></div>`;
   }
   if (!m.midia_url) return '';
@@ -1451,12 +1424,12 @@ function renderizarMidia(m) {
       + `<video controls src="${url}" style="max-width:220px; max-height:220px; border-radius:8px; display:block;"></video>`
       + `<button type="button" class="midia-amp" data-midia-url="${url}" data-midia-tipo="video" title="Ampliar" `
       + `style="position:absolute; top:6px; right:6px; border:none; background:rgba(0,0,0,.55); color:#fff; `
-      + `width:28px; height:28px; border-radius:6px; cursor:zoom-in; font-size:14px; line-height:1; padding:0;">⛶</button>`
+      + `width:28px; height:28px; border-radius:6px; cursor:zoom-in; padding:0; display:flex; align-items:center; justify-content:center;">${icone('maximize-2', 14)}</button>`
       + `</div>`;
   }
   if (m.midia_tipo === 'documento') {
     const nome = m.midia_nome || 'documento';
-    return `<a href="${url}" download="${escapeHtml(nome)}" style="display:block; margin-bottom:6px;">📄 Baixar ${escapeHtml(nome)}</a>`;
+    return `<a class="midia-doc" href="${url}" download="${escapeHtml(nome)}">${icone('file-text', 18)}<span>Baixar ${escapeHtml(nome)}</span></a>`;
   }
   if (m.midia_tipo === 'sticker') {
     return `<img src="${url}" style="max-width:100px; display:block; margin-bottom:4px;" />`;
@@ -1514,20 +1487,55 @@ function formatarTextoMensagem(texto) {
   );
 }
 
+function rotuloDiaConversa(data) {
+  const hoje = new Date();
+  const ontem = new Date(hoje);
+  ontem.setDate(hoje.getDate() - 1);
+  if (data.toDateString() === hoje.toDateString()) return 'Hoje';
+  if (data.toDateString() === ontem.toDateString()) return 'Ontem';
+  const opcoes = { day: 'numeric', month: 'long' };
+  if (data.getFullYear() !== hoje.getFullYear()) opcoes.year = 'numeric';
+  return data.toLocaleDateString('pt-BR', opcoes);
+}
+
 function renderizarConversa(lead) {
   const nome = lead.nome_cliente || lead.telefone;
   document.getElementById('conversa-titulo').textContent = nome;
-  document.getElementById('conversa-avatar').textContent = iniciais(nome);
-  document.getElementById('conversa-subtitulo').textContent = `${lead.telefone} · ${lead.status === 'novo' ? 'Novo' : lead.status === 'em_atendimento' ? 'Em atendimento' : 'Encerrado'}`;
+  const avatarEl = document.getElementById('conversa-avatar');
+  avatarEl.textContent = iniciais(nome);
+  avatarEl.style.background = corAvatar(lead.id);
+  const statusBadge = lead.status === 'novo'
+    ? '<span class="ui-badge ui-badge--red ui-badge--dot">Novo</span>'
+    : lead.status === 'em_atendimento'
+      ? '<span class="ui-badge ui-badge--brand ui-badge--dot">Em atendimento</span>'
+      : '<span class="ui-badge ui-badge--dot">Encerrada</span>';
+  const atendente = lead.vendedor_id ? nomeVendedor(lead.vendedor_id) : '';
+  document.getElementById('conversa-subtitulo').innerHTML =
+    `<span class="chat-phone">${icone('phone', 12)}${escapeHtml(lead.telefone)}</span>`
+    + (atendente ? `<span class="chat-phone" title="Atendente">${icone('user', 12)}${escapeHtml(atendente)}</span>` : '')
+    + statusBadge;
   document.getElementById('btn-salvar-contato').style.display = lead.contato_salvo ? 'none' : 'inline-block';
 
   const msgsEl = document.getElementById('conversa-mensagens');
   const porId = {};
   lead.mensagens.forEach((m) => { porId[m.id] = m; });
 
-  msgsEl.innerHTML = lead.mensagens.map(m => {
+  msgsEl.innerHTML = lead.mensagens.map((m, i) => {
     const classe = m.remetente === 'cliente' ? 'balao-cliente' : m.remetente === 'ia' ? 'balao-ia' : 'balao-vendedor';
-    const hora = new Date(m.criado_em + 'Z').toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    const dataMsg = new Date(m.criado_em + 'Z');
+    const hora = dataMsg.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const anterior = i > 0 ? lead.mensagens[i - 1] : null;
+    const dataAnterior = anterior ? new Date(anterior.criado_em + 'Z') : null;
+    // Separador de dia (só visual): "Hoje", "Ontem" ou a data por extenso.
+    const separadorHtml = !dataAnterior || dataAnterior.toDateString() !== dataMsg.toDateString()
+      ? `<div class="chat-dia"><span>${rotuloDiaConversa(dataMsg)}</span></div>` : '';
+    // Mensagens seguidas do mesmo lado ficam agrupadas (menos espaço, sem "bico").
+    const seguida = !separadorHtml && anterior && anterior.remetente === m.remetente;
+    const temMidia = !!m.midia_url && m.midia_tipo !== 'contato';
+    // "[Áudio]", "[Imagem]"... é o texto de reserva salvo junto com a mídia;
+    // com a mídia desenhada no balão, o rótulo repetido some (o texto salvo não muda).
+    const textoSoRotulo = temMidia && /^\[(Imagem|Áudio|Vídeo|Sticker|Anexo)\]$|^\[Documento\]/.test((m.texto || '').trim());
+    const classesExtras = `${seguida ? 'balao--seguida' : ''} ${temMidia ? `balao--midia balao--midia-${m.midia_tipo}` : ''} ${textoSoRotulo ? 'balao--so-midia' : ''}`;
 
     let citacaoHtml = '';
     const original = m.responde_a ? porId[m.responde_a] : null;
@@ -1537,16 +1545,17 @@ function renderizarConversa(lead) {
     }
 
     const podeEditarApagar = m.remetente === 'vendedor' && !m.apagada;
-    const acoesHtml = `<span class="balao-acoes"><span class="balao-btn-responder" onclick="iniciarResposta(${m.id})" title="Responder">↩</span><span class="balao-btn-responder" onclick="abrirEncaminhar(${m.id})" title="Encaminhar">↪</span>${podeEditarApagar ? `<span class="balao-btn-responder" onclick="abrirEditarMensagem(${m.id})" title="Editar">✏️</span>` : ''}${podeEditarApagar ? `<span class="balao-btn-responder" onclick="apagarMensagem(${m.id})" title="Apagar">🗑️</span>` : ''}</span>`;
+    const acoesHtml = `<span class="balao-acoes"><span class="balao-btn-responder" onclick="iniciarResposta(${m.id})" title="Responder">${icone('reply', 14)}</span><span class="balao-btn-responder" onclick="abrirEncaminhar(${m.id})" title="Encaminhar">${icone('forward', 14)}</span>${podeEditarApagar ? `<span class="balao-btn-responder" onclick="abrirEditarMensagem(${m.id})" title="Editar">${icone('pencil', 14)}</span>` : ''}${podeEditarApagar ? `<span class="balao-btn-responder balao-btn-responder--danger" onclick="apagarMensagem(${m.id})" title="Apagar">${icone('trash-2', 14)}</span>` : ''}</span>`;
     const marcaEditada = m.editada && !m.apagada ? '<span style="opacity:.6; font-size:10px;"> (editada)</span>' : '';
 
     let checkHtml = '';
     if (m.remetente !== 'cliente' && m.status_entrega) {
-      if (m.status_entrega === 'lido') checkHtml = '<span class="balao-check lido" title="Lido">✓✓</span>';
-      else if (m.status_entrega === 'entregue') checkHtml = '<span class="balao-check" title="Entregue">✓✓</span>';
-      else checkHtml = '<span class="balao-check" title="Enviado">✓</span>';
+      if (m.status_entrega === 'lido') checkHtml = `<span class="balao-check lido" title="Lido">${icone('check-check', 14)}</span>`;
+      else if (m.status_entrega === 'entregue') checkHtml = `<span class="balao-check" title="Entregue">${icone('check-check', 14)}</span>`;
+      else checkHtml = `<span class="balao-check" title="Enviado">${icone('check', 14)}</span>`;
     }
-    return `<div class="balao ${classe} ${m.apagada ? 'balao-apagada' : ''}" id="msg-${m.id}">${acoesHtml}${citacaoHtml}${renderizarMidia(m)}${formatarTextoMensagem(m.texto)}${marcaEditada}<div class="balao-hora"><span class="hora-txt">${m.remetente === 'ia' ? 'IA · ' : ''}${hora}</span>${checkHtml}</div></div>`;
+    const textoHtml = textoSoRotulo ? '' : `<span class="balao-texto">${formatarTextoMensagem(m.texto)}${marcaEditada}</span>`;
+    return `${separadorHtml}<div class="balao ${classe} ${classesExtras} ${m.apagada ? 'balao-apagada' : ''}" id="msg-${m.id}" title="${dataMsg.toLocaleString('pt-BR')}">${acoesHtml}${citacaoHtml}${renderizarMidia(m)}${textoHtml}<span class="balao-hora"><span class="hora-txt">${m.remetente === 'ia' ? 'IA · ' : ''}${hora}</span>${checkHtml}</span></div>`;
   }).join('');
   // Vai pro fim (última mensagem). Como as imagens têm altura 0 até carregar,
   // um scroll só "no fim" abre no meio da conversa — então re-scrolla depois
@@ -1621,14 +1630,16 @@ async function alternarGravacaoAudio() {
       };
       leitor.readAsDataURL(blob);
       gravando = false;
-      btn.textContent = '🎤';
-      btn.style.background = '';
+      btn.innerHTML = icone('mic', 18);
+      btn.classList.remove('is-recording');
+      btn.title = 'Gravar áudio';
     };
 
     gravador.start();
     gravando = true;
-    btn.textContent = '⏹';
-    btn.style.background = 'var(--red)';
+    btn.innerHTML = icone('square', 16);
+    btn.classList.add('is-recording');
+    btn.title = 'Parar gravação';
   } catch (err) {
     alert('Não consegui acessar o microfone. Confere se você deu permissão pro navegador.');
   }
@@ -1714,8 +1725,8 @@ function renderizarPreviewAnexos() {
   preview.style.display = 'flex';
   preview.style.flexWrap = 'wrap';
   preview.innerHTML = anexosSelecionados.map((a, i) => `
-    <span style="display:inline-flex; align-items:center; gap:4px; background:var(--card); border:1px solid var(--border); border-radius:14px; padding:2px 8px;">
-      📎 ${escapeHtml(a.nome)} <button class="link-mini" onclick="removerAnexo(${i})" style="padding:0;">✕</button>
+    <span class="anexo-chip">
+      ${icone('paperclip', 13)}${escapeHtml(a.nome)}<button type="button" onclick="removerAnexo(${i})" title="Remover anexo" aria-label="Remover anexo">${icone('x', 12)}</button>
     </span>
   `).join('') + (anexosSelecionados.length > 1 ? `<span style="color:var(--muted); font-size:11px;">${anexosSelecionados.length} arquivos — cada um vira uma mensagem separada</span>` : '');
 }
@@ -1754,7 +1765,7 @@ async function selecionarAnexo(event) {
   if (arquivos.length === 0) return;
   const preview = document.getElementById('conversa-anexo-preview');
   preview.style.display = 'flex';
-  preview.innerHTML = `📎 Processando ${arquivos.length} arquivo(s)...`;
+  preview.innerHTML = `Processando ${arquivos.length} arquivo(s)...`;
   for (const arquivo of arquivos) {
     await processarUmArquivo(arquivo);
   }
@@ -1887,7 +1898,7 @@ async function carregarFigurinhas() {
   const ehAdmin = usuarioAtual && usuarioAtual.role === 'admin';
   let html = '';
   if (lista.length === 0) {
-    html += `<div class="empty-state" style="font-size:12px; border:none; padding:10px;">Nenhuma figurinha ainda.${ehAdmin ? ' Adicione abaixo 👇' : ' (o admin cadastra em Configurações)'}</div>`;
+    html += `<div class="empty-state" style="font-size:12px; border:none; padding:10px;">Nenhuma figurinha ainda.${ehAdmin ? ' Adicione abaixo.' : ' (o admin cadastra em Configurações)'}</div>`;
   } else {
     html += `<div style="display:flex; flex-wrap:wrap; gap:6px;">` + lista.map((f) => `
       <div style="position:relative;">
@@ -1898,7 +1909,7 @@ async function carregarFigurinhas() {
   }
   if (ehAdmin) {
     html += `<div style="margin-top:10px; border-top:1px solid var(--border); padding-top:8px;">
-      <button type="button" class="link-mini" onclick="document.getElementById('figurinha-arquivo').click()">➕ Adicionar figurinha</button>
+      <button type="button" class="link-mini" onclick="document.getElementById('figurinha-arquivo').click()">Adicionar figurinha</button>
       <input type="file" id="figurinha-arquivo" style="display:none;" accept="image/*" onchange="adicionarFigurinha(event)" />
     </div>`;
   }
@@ -2099,8 +2110,8 @@ async function reabrirLeadDaConversa() {
 async function sugerirTarefaIA() {
   if (!leadConversaAtual) return;
   const box = document.getElementById('conversa-sugestao-tarefa');
-  box.style.display = 'block';
-  box.textContent = '🤖 Lendo a conversa...';
+  box.style.display = 'flex';
+  box.innerHTML = `${icone('sparkles', 16)}<span>Lendo a conversa...</span>`;
 
   const res = await fetch(`${API}/api/leads/${leadConversaAtual.id}/sugestao-tarefa`);
   const sugestao = await res.json();
@@ -2111,11 +2122,11 @@ async function sugerirTarefaIA() {
   }
 
   if (!sugestao.sugerir) {
-    box.textContent = '🤖 Não achei nenhuma ação pendente óbvia nessa conversa.';
+    box.innerHTML = `${icone('sparkles', 16)}<span>Não achei nenhuma ação pendente óbvia nessa conversa.</span>`;
     return;
   }
 
-  box.innerHTML = `🤖 Sugestão: <strong>${escapeHtml(sugestao.titulo)}</strong> <button class="link-mini" style="margin-left:6px;" onclick='usarSugestaoTarefa(${JSON.stringify(sugestao).replace(/'/g, "&apos;")})'>Criar essa tarefa</button>`;
+  box.innerHTML = `${icone('sparkles', 16)}<span>Sugestão:</span> <strong>${escapeHtml(sugestao.titulo)}</strong> <button class="link-mini" style="margin-left:6px;" onclick='usarSugestaoTarefa(${JSON.stringify(sugestao).replace(/'/g, "&apos;")})'>Criar essa tarefa</button>`;
 }
 
 function usarSugestaoTarefa(sugestao) {
@@ -2452,21 +2463,23 @@ function renderizarItemConversa(l) {
   const nome = l.nome_cliente || l.telefone;
   const previewBruto = l.ultima_mensagem ? l.ultima_mensagem.texto : l.primeira_mensagem;
   const preview = previewBruto.replace(/^\*(.+?):\*\n/, '$1: ');
-  const tagVendedor = ehGestor(usuarioAtual) && l.vendedor_nome ? `<span class="setor-tag">${escapeHtml(l.vendedor_nome)}</span>` : '';
+  const tagVendedor = ehGestor(usuarioAtual) && l.vendedor_nome ? `<span class="ui-badge" title="Responsável">${icone('user', 12)}${escapeHtml(l.vendedor_nome)}</span>` : '';
   const naoLidas = l.nao_lidas || 0;
   const semResposta = precisaResposta(l);
   const hora = l.ultima_mensagem ? formatarHoraConversa(l.ultima_mensagem.criado_em) : '';
-  let ladoDireito = `<span class="conv-time">${hora}</span>`;
-  if (naoLidas > 0) ladoDireito += `<span class="conv-unread-badge">${naoLidas > 9 ? '9+' : naoLidas}</span>`;
-  else if (semResposta) ladoDireito += `<span class="conv-waiting-label">Aguardando resposta</span>`;
+  const badgeNaoLidas = naoLidas > 0 ? `<span class="conv-unread-badge">${naoLidas > 9 ? '9+' : naoLidas}</span>` : '';
+  const badgeStatus = semResposta
+    ? '<span class="ui-badge ui-badge--orange ui-badge--dot">Aguardando resposta</span>'
+    : l.status === 'encerrado' ? '<span class="ui-badge">Encerrada</span>' : '';
+  const badgesHtml = badgeStatus || tagVendedor ? `<div class="item-badges">${badgeStatus}${tagVendedor}</div>` : '';
   return `
-    <li class="conv-item ${naoLidas > 0 ? 'conv-item--nao-lida' : ''} ${semResposta ? 'conv-item--aguardando' : ''}" onclick="abrirConversa(${l.id})">
+    <li class="conv-item ${naoLidas > 0 ? 'conv-item--nao-lida' : ''} ${semResposta ? 'conv-item--aguardando' : ''}" data-id="${l.id}" onclick="abrirConversa(${l.id})">
       <div class="conv-avatar" style="background:${corAvatar(l.id)};">${escapeHtml(iniciais(nome))}</div>
       <div class="conv-main">
-        <div class="conv-name">${escapeHtml(nome)} ${tagVendedor}</div>
-        <p class="conv-preview">${escapeHtml(preview)}</p>
+        <div class="item-row"><span class="conv-name">${escapeHtml(nome)}</span><span class="conv-time">${hora}</span></div>
+        <div class="item-row"><p class="conv-preview">${previewComIcone(preview)}</p>${badgeNaoLidas}</div>
+        ${badgesHtml}
       </div>
-      <div class="conv-side">${ladoDireito}</div>
     </li>
   `;
 }
@@ -2483,9 +2496,11 @@ async function carregarConversasAtivas(termoBusca) {
     if (res.status === 401) return window.location.href = '/login.html';
     const todos = await res.json();
     leads = todos.filter(l => !l.restrito);
+    conversasRecentesCache = leads; // em atendimento + encerradas recentes — usado na tela Clientes
   }
 
   conversasAtivasCache = leads.filter(l => l.status !== 'encerrado');
+  atualizarIndicadoresInicio();
 
   // --- Card "Conversas em Andamento" (Início): só em_atendimento ---
   const ativas = ordenarConversasPorAtividade(leads.filter((l) => l.status !== 'encerrado'));
@@ -2502,24 +2517,12 @@ async function carregarConversasAtivas(termoBusca) {
       : `<li class="empty-state" style="padding:14px; font-size:12px;">${termoBusca ? 'Nenhuma conversa encontrada.' : 'Nenhuma conversa ativa no momento.'}</li>`;
   }
 
-  // --- Aba "Histórico": só encerrado, últimas 24h (a busca cobre o resto
-  // — a não ser que ela esteja em uso, nesse caso quem manda é
-  // filtrarHistorico, não aqui) ---
+  // --- Aba "Histórico": só encerrado, no período escolhido (padrão: últimas
+  // 24h; a busca cobre o resto — a não ser que ela esteja em uso, nesse caso
+  // quem manda é filtrarHistorico, não aqui). Lista e indicadores: historico-ui.js ---
   const buscaHistoricoEl = document.getElementById('busca-historico');
   if (buscaHistoricoEl && buscaHistoricoEl.value.trim().length >= 2) return;
-  const elHistorico = document.getElementById('historico-lista');
-  if (elHistorico) {
-    const ha24h = Date.now() - 24 * 60 * 60 * 1000;
-    const encerradasRecentes = leads.filter((l) => l.status === 'encerrado' && l.encerrado_em && new Date(l.encerrado_em + 'Z').getTime() >= ha24h);
-    const encerradas = ordenarConversasPorAtividade(encerradasRecentes);
-    const sigH = encerradas.map((l) => `${l.id}~${((l.ultima_mensagem ? l.ultima_mensagem.texto : l.primeira_mensagem) || '').slice(0, 30)}`).join('|');
-    if (sigH !== sigHistorico || (encerradas.length > 0 && !elHistorico.querySelector('.conv-item'))) {
-      sigHistorico = sigH;
-      elHistorico.innerHTML = encerradas.length > 0
-        ? encerradas.map(renderizarItemConversa).join('')
-        : `<li class="empty-state" style="padding:14px; font-size:12px;">Nenhuma conversa encerrada nas últimas 24h. Use a busca acima pra achar conversas mais antigas.</li>`;
-    }
-  }
+  renderizarListaHistorico(leads);
 }
 
 // Busca dedicada da aba Histórico — não mexe no card de "Conversas em
@@ -2542,14 +2545,12 @@ async function carregarHistorico(termoBusca) {
   if (res.status === 401) return window.location.href = '/login.html';
   const leads = await res.json();
   const encerradas = ordenarConversasPorAtividade(leads.filter((l) => l.status === 'encerrado'));
-  elHistorico.innerHTML = encerradas.length > 0
-    ? encerradas.map(renderizarItemConversa).join('')
-    : `<li class="empty-state" style="padding:14px; font-size:12px;">Nenhuma conversa encerrada encontrada.</li>`;
+  renderizarBuscaHistorico(encerradas);
 }
 
 // Cor consistente por conversa (mesmo lead sempre com a mesma cor de
 // avatar), só pra dar variedade visual — sem significado nenhum.
-const CORES_AVATAR = ['#2B3990', '#16A34A', '#D97706', '#7C3AED', '#DB2777', '#0891B2'];
+const CORES_AVATAR = ['#2B3990', '#0E7490', '#6D28D9', '#B45309', '#BE185D', '#047857'];
 function corAvatar(id) {
   return CORES_AVATAR[id % CORES_AVATAR.length];
 }
@@ -2678,6 +2679,7 @@ function atualizarBadgeAgenda(quantidade) {
   if (!badge) return;
   badge.textContent = quantidade > 9 ? '9+' : quantidade;
   badge.hidden = quantidade === 0;
+  atualizarKpiTarefas(quantidade);
 }
 async function atualizarContadorPendentesAgenda() {
   if (!setorAtivo) return;
@@ -2689,7 +2691,7 @@ async function atualizarContadorPendentesAgenda() {
 
 function mudarAbaAgenda(status) {
   abaAgendaAtual = status;
-  document.querySelectorAll('#agenda-abas .filter-chip').forEach((b) => {
+  document.querySelectorAll('#agenda-abas .ui-segmented-item').forEach((b) => {
     b.classList.toggle('is-active', b.dataset.status === status);
   });
   carregarLembretes();
@@ -2707,6 +2709,7 @@ function categoriaLembrete(l) {
   return { label: 'Gargalo', classe: 'tag-gargalo' };
 }
 
+// (Formato antigo de data da Agenda — a lista nova usa prazoCurto() do agenda-ui.js.)
 function formatarQuandoAgenda(dataStr) {
   const data = new Date(dataStr);
   const agora = new Date();
@@ -2720,46 +2723,27 @@ function formatarQuandoAgenda(dataStr) {
 
 async function carregarLembretes() {
   if (!setorAtivo) return;
-  const res = await fetch(`${API}/api/lembretes?status=${abaAgendaAtual}&setor=${setorAtivo}`);
+  // Busca sempre "todas" (= pendentes + concluídas nas últimas 24h, a mesma
+  // regra do servidor) e o filtro de status é aplicado na tela — assim os
+  // indicadores da Agenda (Pendentes, Hoje, Atrasadas, Concluídas) saem da
+  // MESMA chamada, sem requisição a mais.
+  const res = await fetch(`${API}/api/lembretes?status=todas&setor=${setorAtivo}`);
   if (res.status === 401) return window.location.href = '/login.html';
   const lembretes = await res.json();
-  const el = document.getElementById('lembretes');
-  if (!el) return;
+  if (!document.getElementById('lembretes')) return;
+
+  const pendentes = lembretes.filter((l) => !l.feito);
+  atualizarBadgeAgenda(pendentes.length);
 
   const subtituloEl = document.getElementById('agenda-subtitulo');
   if (subtituloEl) {
-    const rotulo = { pendentes: 'pendentes', concluidas: 'concluídas', todas: 'no total' }[abaAgendaAtual];
-    subtituloEl.textContent = `${lembretes.length} tarefa${lembretes.length === 1 ? '' : 's'} ${rotulo}.`;
-  }
-  if (abaAgendaAtual === 'pendentes') {
-    atualizarBadgeAgenda(lembretes.length);
-  }
-
-  if (lembretes.length === 0) {
-    const vazio = { pendentes: 'Nenhuma tarefa pendente.', concluidas: 'Nenhuma tarefa concluída ainda.', todas: 'Nenhuma tarefa ainda.' }[abaAgendaAtual];
-    el.innerHTML = `<div class="empty-state">${vazio}</div>`;
-    return;
+    const n = pendentes.length;
+    const texto = n === 0 ? 'Nenhuma tarefa pendente. Tarefas geradas pela IA e criadas manualmente.'
+      : `${n} tarefa${n === 1 ? '' : 's'} pendente${n === 1 ? '' : 's'} · geradas pela IA e criadas manualmente.`;
+    if (subtituloEl.textContent !== texto) subtituloEl.textContent = texto;
   }
 
-  el.innerHTML = lembretes.map((l) => {
-    const cat = categoriaLembrete(l);
-    const tituloLimpo = escapeHtml((l.titulo || '').replace(/^🤖\s*/, ''));
-    const nome = l.nome_cliente || l.telefone;
-    return `
-      <div class="task-card ${l.feito ? 'task-card--feito' : ''}">
-        <button class="task-check" onclick="event.stopPropagation(); ${l.feito ? '' : `concluirLembrete(${l.id})`}" title="${l.feito ? 'Concluída' : 'Marcar como concluída'}">${l.feito ? '✓' : ''}</button>
-        <div class="task-main">
-          <div class="task-top">
-            <span class="task-titulo">${tituloLimpo}</span>
-            <span class="tag ${cat.classe}">${cat.label}</span>
-          </div>
-          <div class="task-sub">
-            ${formatarQuandoAgenda(l.quando)} · <a href="#" onclick="event.preventDefault(); abrirConversa(${l.lead_id})">Abrir conversa com ${escapeHtml(nome)} →</a>
-          </div>
-        </div>
-      </div>
-    `;
-  }).join('');
+  renderizarAgenda(lembretes);
 }
 
 async function concluirLembrete(id) {
@@ -2855,36 +2839,21 @@ async function atualizarBotaoNotificacoes() {
   if (btns.length === 0) return;
 
   if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) {
-    btns.forEach((btn) => {
-      btn.textContent = '🔕 Notificação indisponível';
-      btn.disabled = true;
-      btn.title = 'Esse navegador não suporta notificação. No iPhone, use "Adicionar à Tela de Início" pelo Safari primeiro.';
-    });
+    definirEstadoNotificacao('indisponivel', 'Esse navegador não suporta notificação. No iPhone, use "Adicionar à Tela de Início" pelo Safari primeiro.');
     return;
   }
 
   if (Notification.permission === 'denied') {
-    btns.forEach((btn) => {
-      btn.textContent = '🚫 Notificação bloqueada';
-      btn.title = 'Você bloqueou a notificação pra esse site — pra reativar, muda isso nas configurações do navegador.';
-    });
+    definirEstadoNotificacao('bloqueado', 'Você bloqueou a notificação pra esse site — pra reativar, muda isso nas configurações do navegador.');
     return;
   }
 
   const inscricao = await inscricaoAtual();
-  btns.forEach((btn) => {
-    if (inscricao) {
-      btn.textContent = '🔔 Notificações ativadas';
-      btn.title = 'Clique pra desativar';
-    } else {
-      btn.textContent = '🔕 Ativar notificações';
-      btn.title = 'Receba aviso de lead novo ou mensagem mesmo com o app fechado';
-    }
-  });
+  if (inscricao) definirEstadoNotificacao('ativo', 'Clique pra desativar');
+  else definirEstadoNotificacao('inativo', 'Receba aviso de lead novo ou mensagem mesmo com o app fechado');
 }
 
 async function alternarNotificacoes() {
-  const btns = document.querySelectorAll('.btn-notificacoes-el');
   if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) {
     alert('Esse navegador não suporta notificação. No iPhone: abra pelo Safari, toque em Compartilhar → "Adicionar à Tela de Início", e acesse o sistema por esse ícone instalado.');
     return;
@@ -2909,7 +2878,7 @@ async function alternarNotificacoes() {
   }
 
   // Ativar
-  btns.forEach((btn) => { btn.textContent = '⏳ Ativando...'; });
+  definirEstadoNotificacao('ativando');
   const permissao = await Notification.requestPermission();
   if (permissao !== 'granted') {
     alert('Sem permissão de notificação, não dá pra te avisar de lead novo com o app fechado. Você pode mudar isso depois nas configurações do navegador.');
