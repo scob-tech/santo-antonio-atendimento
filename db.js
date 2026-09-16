@@ -266,6 +266,12 @@ if (!colunaExiste('mensagens', 'status_entrega')) {
 if (!colunaExiste('mensagens', 'midia_compactada')) {
   db.exec(`ALTER TABLE mensagens ADD COLUMN midia_compactada INTEGER NOT NULL DEFAULT 0`);
 }
+// Contato COMPARTILHADO (vCard): quando o cliente manda um "cartão de contato"
+// dentro da conversa, guardamos aqui o telefone dele — assim o cartão vira
+// clicável (iniciar conversa / salvar contato) em vez de texto morto.
+if (!colunaExiste('mensagens', 'contato_telefone')) {
+  db.exec(`ALTER TABLE mensagens ADD COLUMN contato_telefone TEXT`);
+}
 // marca quando o dono (ou gestor) abriu a conversa pela última vez —
 // alimenta o badge de "mensagem não lida" nas Conversas Ativas
 if (!colunaExiste('leads', 'visto_em')) {

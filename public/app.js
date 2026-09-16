@@ -283,6 +283,120 @@ async function abrirConversaPorTelefone(telefone, nome) {
   setTimeout(() => abrirConversa(data.lead_id), 200);
 }
 
+// ---------------- Nova conversa (estilo WhatsApp) ----------------
+// Abre um seletor onde a pessoa busca por nome/telefone de quem JÁ mandou
+// mensagem OU de um contato salvo, ou digita um número NOVO — e ao escolher,
+// cai direto na conversa pra mandar a primeira mensagem. Reaproveita
+// abrirConversaPorTelefone (que abre a conversa existente ou cria uma nova
+// sem nunca duplicar).
+let ncBuscaTimeout = null;
+function soDigitosTel(s) { return (s || '').replace(/\D/g, ''); }
+
+function abrirNovaConversa() {
+  const inp = document.getElementById('nc-busca');
+  if (inp) inp.value = '';
+  const lista = document.getElementById('nc-resultados');
+  if (lista) lista.innerHTML = '<li class="empty-state" style="padding:14px; font-size:12px;">Digite um nome ou número pra buscar. Se for um número novo (com DDD), aparece a opção de iniciar a conversa.</li>';
+  abrirModal('modal-nova-conversa');
+  setTimeout(() => { if (inp) inp.focus(); }, 100);
+}
+
+function filtrarNovaConversa(termo) {
+  clearTimeout(ncBuscaTimeout);
+  ncBuscaTimeout = setTimeout(() => carregarNovaConversaResultados((termo || '').trim()), 250);
+}
+
+async function carregarNovaConversaResultados(termo) {
+  const lista = document.getElementById('nc-resultados');
+  if (!lista) return;
+  if (!termo) {
+    lista.innerHTML = '<li class="empty-state" style="padding:14px; font-size:12px;">Digite um nome ou número pra buscar. Se for um número novo (com DDD), aparece a opção de iniciar a conversa.</li>';
+    return;
+  }
+  lista.innerHTML = '<li class="empty-state" style="padding:14px; font-size:12px;">Buscando…</li>';
+
+  // Duas fontes: contatos salvos + quem já mandou mensagem (leads do setor).
+  const [contatos, leads] = await Promise.all([
+    fetch(`${API}/api/contatos?q=${encodeURIComponent(termo)}`).then((r) => (r.ok ? r.json() : [])).catch(() => []),
+    (termo.length >= 2
+      ? fetch(`${API}/api/leads/buscar?q=${encodeURIComponent(termo)}&setor=${setorAtivo}`).then((r) => (r.ok ? r.json() : [])).catch(() => [])
+      : Promise.resolve([])),
+  ]);
+
+  // Dedupe por telefone — um contato salvo tem prioridade sobre o lead.
+  const porTelefone = new Map();
+  (contatos || []).forEach((c) => { if (c.telefone) porTelefone.set(c.telefone, { telefone: c.telefone, nome: c.nome, origem: 'contato' }); });
+  (leads || []).forEach((l) => {
+    if (l.is_grupo) return; // grupo não é conversa nova 1-a-1
+    if (l.telefone && !porTelefone.has(l.telefone)) {
+      porTelefone.set(l.telefone, { telefone: l.telefone, nome: l.nome_cliente || l.telefone, origem: 'lead' });
+    }
+  });
+
+  const itens = [...porTelefone.values()];
+  const dig = soDigitosTel(termo);
+  const jaTemNumero = itens.some((i) => { const d = soDigitosTel(i.telefone); return d === dig || d.endsWith(dig) || dig.endsWith(d); });
+
+  let html = '';
+
+  // Termo é um número (>=10 dígitos com DDD) e não bateu com ninguém: oferece iniciar com ele.
+  if (dig.length >= 10 && !jaTemNumero) {
+    html += `
+      <li class="conv-item" onclick="iniciarConversaNova('${escapeHtml(dig)}','')">
+        <div class="conv-avatar" style="background:var(--navy); color:#fff;">✏️</div>
+        <div class="conv-main">
+          <div class="conv-name">Iniciar conversa com ${escapeHtml(dig)}</div>
+          <p class="conv-preview">Número novo — nunca conversou aqui</p>
+        </div>
+      </li>`;
+  }
+
+  html += itens.map((i) => {
+    const nomeEsc = escapeHtml(i.nome).replace(/'/g, "\\'");
+    const telEsc = escapeHtml(i.telefone);
+    const cor = corAvatar(Number(soDigitosTel(i.telefone).slice(-4)) || 0);
+    const etiqueta = i.origem === 'contato' ? 'Contato salvo' : 'Já mandou mensagem';
+    return `
+      <li class="conv-item" onclick="iniciarConversaNova('${telEsc}','${nomeEsc}')">
+        <div class="conv-avatar" style="background:${cor};">${escapeHtml(iniciais(i.nome))}</div>
+        <div class="conv-main">
+          <div class="conv-name">${escapeHtml(i.nome)}</div>
+          <p class="conv-preview">${telEsc} · ${etiqueta}</p>
+        </div>
+      </li>`;
+  }).join('');
+
+  if (!html) {
+    html = '<li class="empty-state" style="padding:14px; font-size:12px;">Ninguém encontrado com esse nome. Se for um número novo, digite o telefone completo com DDD pra iniciar.</li>';
+  }
+  lista.innerHTML = html;
+}
+
+function iniciarConversaNova(telefone, nome) {
+  fecharModal('modal-nova-conversa');
+  abrirConversaPorTelefone(telefone, nome || '');
+}
+
+// Salva na agenda de contatos um número que veio num cartão de contato
+// compartilhado dentro da conversa (POST /api/contatos). Um clique, sem sair
+// da conversa — é o que a atendente antes só conseguia fazer pelo web.
+async function salvarContatoCompartilhado(botao, telefone, nome) {
+  const textoOriginal = botao ? botao.textContent : '';
+  if (botao) { botao.disabled = true; botao.textContent = 'Salvando…'; }
+  try {
+    const res = await fetch(`${API}/api/contatos`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ telefone, nome: nome || telefone }),
+    });
+    if (!res.ok) throw new Error('falhou');
+    if (botao) { botao.textContent = '✓ Contato salvo'; botao.style.opacity = '.7'; botao.style.cursor = 'default'; }
+  } catch (e) {
+    if (botao) { botao.disabled = false; botao.textContent = textoOriginal || '💾 Salvar contato'; }
+    alert('Não consegui salvar o contato agora. Tenta de novo em instantes.');
+  }
+}
+
 let progressoPeriodo = 'semana';
 let progressoGranularidade = 'diario';
 let progressoPeriodoCustom = null; // { inicio, fim } ou null (usa o preset)
@@ -1296,6 +1410,28 @@ async function abrirConversa(leadId) {
 }
 
 function renderizarMidia(m) {
+  // Contato COMPARTILHADO (vCard) — vem ANTES do check de midia_url porque
+  // não é arquivo: o número fica em contato_telefone. Vira um cartão clicável
+  // com "Iniciar conversa" e "Salvar contato", igual ao WhatsApp.
+  if (m.midia_tipo === 'contato') {
+    const tel = m.contato_telefone ? String(m.contato_telefone).replace(/\D/g, '') : '';
+    const nome = (m.texto || '').replace(/^\[Contato\]\s*/i, '').trim() || tel || 'Contato';
+    const wrap = 'border:1px solid var(--border); border-radius:12px; padding:10px 12px; margin-bottom:6px; background:var(--card); max-width:260px;';
+    if (!tel) {
+      // Cartões recebidos ANTES desta atualização não têm o número guardado.
+      return `<div style="${wrap}"><div style="font-weight:700; color:var(--navy);">👤 ${escapeHtml(nome)}</div><div style="font-size:12px; color:var(--muted); margin-top:2px;">Contato compartilhado</div></div>`;
+    }
+    const nomeEsc = escapeHtml(nome).replace(/'/g, "\\'");
+    const telEsc = escapeHtml(tel);
+    return `<div style="${wrap}">`
+      + `<div style="display:flex; align-items:center; gap:8px;"><span style="font-size:22px;">👤</span>`
+      + `<div style="min-width:0;"><div style="font-weight:700; color:var(--navy); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(nome)}</div>`
+      + `<div style="font-size:12px; color:var(--muted);">${telEsc}</div></div></div>`
+      + `<div style="display:flex; gap:6px; margin-top:8px;">`
+      + `<button type="button" onclick="abrirConversaPorTelefone('${telEsc}','${nomeEsc}')" style="flex:1; background:var(--navy); color:#fff; border:none; border-radius:8px; padding:7px 8px; font-size:12px; font-weight:600; cursor:pointer;">💬 Iniciar conversa</button>`
+      + `<button type="button" onclick="salvarContatoCompartilhado(this,'${telEsc}','${nomeEsc}')" style="flex:1; background:var(--card); color:var(--navy); border:1px solid var(--navy); border-radius:8px; padding:7px 8px; font-size:12px; font-weight:600; cursor:pointer;">💾 Salvar contato</button>`
+      + `</div></div>`;
+  }
   if (!m.midia_url) return '';
   // urlMidiaSegura já escapa e recusa qualquer esquema que não seja
   // http(s)/data — se vier nula, a URL era suspeita (ex: "javascript:")

@@ -410,7 +410,31 @@ function truncar(texto, tamanho = 100) {
   return texto.length > tamanho ? texto.slice(0, tamanho - 1) + '…' : texto;
 }
 
-async function processarMensagemRecebida({ telefone, nome_cliente, texto, origem, midia_url, midia_tipo, setor = 'vendas', isGrupo = false, zapiMessageId = null, zapiReferenceMessageId = null }) {
+// Extrai o TELEFONE de um contato compartilhado (vCard) que o cliente mandou
+// dentro da conversa. A Z-API manda isso em body.contact (ou body.contacts[]),
+// com o número dentro do vCard. Preferimos o "waid=" (número internacional
+// limpo do WhatsApp); se não tiver, pegamos os dígitos da linha TEL. Devolve
+// só os dígitos, ou null se não achar nada utilizável.
+function extrairTelefoneContatoCompartilhado(body) {
+  if (!body) return null;
+  const c = body.contact || (Array.isArray(body.contacts) ? body.contacts[0] : null);
+  if (!c) return null;
+  const vcard = c.vcard || c.vCard || c.vcardString || c.vCardString || '';
+  let tel = null;
+  const waid = /waid=(\d{8,15})/i.exec(vcard);
+  if (waid) tel = waid[1];
+  if (!tel) {
+    const linhaTel = /TEL[^:\n]*:([+\d()\-.\s]{8,})/i.exec(vcard);
+    if (linhaTel) tel = linhaTel[1].replace(/\D/g, '');
+  }
+  if (!tel && Array.isArray(c.phones) && c.phones[0]) {
+    tel = String(c.phones[0].phone || c.phones[0].number || c.phones[0] || '').replace(/\D/g, '');
+  }
+  if (!tel && (c.phone || c.number)) tel = String(c.phone || c.number).replace(/\D/g, '');
+  return tel && tel.length >= 8 ? tel : null;
+}
+
+async function processarMensagemRecebida({ telefone, nome_cliente, texto, origem, midia_url, midia_tipo, setor = 'vendas', isGrupo = false, zapiMessageId = null, zapiReferenceMessageId = null, contatoTelefone = null }) {
   const setorObj = db.getSetorPorSlug(setor) || db.getSetorPorSlug('vendas');
 
   // Mídia que chega do cliente vem como LINK da Z-API (que pode expirar).
@@ -453,8 +477,8 @@ async function processarMensagemRecebida({ telefone, nome_cliente, texto, origem
 
   if (leadExistente && leadExistente.status !== 'encerrado') {
     // Conversa já em aberto (novo ou em_atendimento) — só adiciona a mensagem
-    db.prepare(`INSERT INTO mensagens (lead_id, remetente, texto, midia_url, midia_tipo, zapi_message_id, responde_a) VALUES (?, 'cliente', ?, ?, ?, ?, ?)`)
-      .run(leadExistente.id, texto, midia_url || null, midia_tipo || null, zapiMessageId, respondeAResolvido);
+    db.prepare(`INSERT INTO mensagens (lead_id, remetente, texto, midia_url, midia_tipo, zapi_message_id, responde_a, contato_telefone) VALUES (?, 'cliente', ?, ?, ?, ?, ?, ?)`)
+      .run(leadExistente.id, texto, midia_url || null, midia_tipo || null, zapiMessageId, respondeAResolvido, contatoTelefone || null);
 
     // Notifica só se já tem dono — se ainda tá "novo" esperando alguém
     // puxar, já mandou push na criação; não fica reenviando a cada
@@ -487,8 +511,8 @@ async function processarMensagemRecebida({ telefone, nome_cliente, texto, origem
     } else {
       db.prepare(`UPDATE leads SET status = ? WHERE id = ?`).run(novoStatus, leadExistente.id);
     }
-    db.prepare(`INSERT INTO mensagens (lead_id, remetente, texto, midia_url, midia_tipo, zapi_message_id, responde_a) VALUES (?, 'cliente', ?, ?, ?, ?, ?)`)
-      .run(leadExistente.id, texto, midia_url || null, midia_tipo || null, zapiMessageId, respondeAResolvido);
+    db.prepare(`INSERT INTO mensagens (lead_id, remetente, texto, midia_url, midia_tipo, zapi_message_id, responde_a, contato_telefone) VALUES (?, 'cliente', ?, ?, ?, ?, ?, ?)`)
+      .run(leadExistente.id, texto, midia_url || null, midia_tipo || null, zapiMessageId, respondeAResolvido, contatoTelefone || null);
 
     if (novoStatus === 'em_atendimento' && leadExistente.vendedor_id) {
       push.notificarVendedor(leadExistente.vendedor_id, {
@@ -538,8 +562,8 @@ async function processarMensagemRecebida({ telefone, nome_cliente, texto, origem
       SELECT * FROM leads WHERE telefone IN (${phTel}) AND setor_id = ? AND status != 'encerrado' ORDER BY criado_em DESC LIMIT 1
     `).get(...variantesTel, setorObj.id);
     if (jaCriado) {
-      db.prepare(`INSERT INTO mensagens (lead_id, remetente, texto, midia_url, midia_tipo, zapi_message_id, responde_a) VALUES (?, 'cliente', ?, ?, ?, ?, ?)`)
-        .run(jaCriado.id, texto, midia_url || null, midia_tipo || null, zapiMessageId, respondeAResolvido);
+      db.prepare(`INSERT INTO mensagens (lead_id, remetente, texto, midia_url, midia_tipo, zapi_message_id, responde_a, contato_telefone) VALUES (?, 'cliente', ?, ?, ?, ?, ?, ?)`)
+        .run(jaCriado.id, texto, midia_url || null, midia_tipo || null, zapiMessageId, respondeAResolvido, contatoTelefone || null);
       return { lead_id: jaCriado.id, info: 'corrida evitada: mensagem grudada em lead recém-criado (não duplicado)' };
     }
   }
@@ -551,8 +575,8 @@ async function processarMensagemRecebida({ telefone, nome_cliente, texto, origem
   const info = insertLead.run(telefone, nome_cliente || null, texto, origem || 'geral', isGrupo ? 'em_atendimento' : 'novo', interesse, setorObj.id, isGrupo ? 1 : 0);
   const leadId = info.lastInsertRowid;
 
-  db.prepare(`INSERT INTO mensagens (lead_id, remetente, texto, midia_url, midia_tipo, zapi_message_id, responde_a) VALUES (?, 'cliente', ?, ?, ?, ?, ?)`)
-    .run(leadId, texto, midia_url || null, midia_tipo || null, zapiMessageId, respondeAResolvido);
+  db.prepare(`INSERT INTO mensagens (lead_id, remetente, texto, midia_url, midia_tipo, zapi_message_id, responde_a, contato_telefone) VALUES (?, 'cliente', ?, ?, ?, ?, ?, ?)`)
+    .run(leadId, texto, midia_url || null, midia_tipo || null, zapiMessageId, respondeAResolvido, contatoTelefone || null);
 
   push.notificarTodosVendedores({
     titulo: isGrupo ? '👥 Nova mensagem em grupo' : '🆕 Novo lead',
@@ -662,13 +686,17 @@ async function processarWebhookMensagem(req, res) {
     }
 
     zapi.marcarProcessada(messageId);
+    // Contato compartilhado (vCard): captura o número do cartão pra ele virar
+    // clicável na conversa. Se for isso, marca a mídia como 'contato'.
+    const telContatoCompartilhado = extrairTelefoneContatoCompartilhado(req.body);
     const resultado = await processarMensagemRecebida({
       telefone,
       nome_cliente: nomeCliente,
       texto,
       origem: 'whatsapp',
       midia_url: midiaUrl,
-      midia_tipo: midiaTipo,
+      midia_tipo: telContatoCompartilhado ? 'contato' : midiaTipo,
+      contatoTelefone: telContatoCompartilhado,
       setor,
       isGrupo,
       zapiMessageId: messageId,
