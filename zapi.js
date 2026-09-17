@@ -120,7 +120,10 @@ function interpretarWebhook(body) {
   } else if (body.location) {
     texto = `[Localização] ${body.location.address || `${body.location.latitude}, ${body.location.longitude}`}`;
   } else if (body.contact) {
-    texto = `[Contato] ${body.contact.displayName || ''}`;
+    // Nome do contato do CARTÃO: displayName; se vier vazio, o FN do vCard.
+    const vcard = body.contact.vCard || body.contact.vcard || '';
+    const fn = /^FN[^:\n]*:(.+)$/im.exec(vcard);
+    texto = `[Contato] ${body.contact.displayName || (fn ? fn[1].trim() : '')}`.trim();
   }
 
   // Formato não reconhecido — loga o payload inteiro pra investigar depois

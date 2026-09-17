@@ -244,6 +244,12 @@ async function confirmarEditarContato() {
     body: JSON.stringify({ nome, telefone }),
   });
   const data = await res.json();
+  if (res.status === 409 && data.contactId) {
+    fecharModal('modal-editar-contato');
+    editarContatoId = null;
+    mostrarContatoExistente(data);
+    return;
+  }
   if (!res.ok) {
     erroEl.textContent = data.erro || 'Não consegui salvar as alterações.';
     erroEl.style.display = 'block';
@@ -253,6 +259,32 @@ async function confirmarEditarContato() {
   editarContatoId = null;
   const busca = document.getElementById('busca-contatos');
   carregarContatos(busca && busca.value.trim() ? busca.value.trim() : undefined);
+}
+
+// ---------------- Contato já existente (409 do cadastro) ----------------
+// O servidor recusa salvar um telefone que já pertence a um contato
+// (considerando +55 e nono dígito) e devolve { contactId, name, phone }.
+let contatoExistente = null;
+
+function mostrarContatoExistente(dados) {
+  contatoExistente = dados;
+  document.getElementById('ce-texto').textContent = `Este telefone já pertence ao contato ${dados.name}.`;
+  abrirModal('modal-contato-existente');
+}
+
+// Abre o painel lateral do contato dono do número. Busca a linha completa
+// (cadastro, responsável) na busca de Clientes; se não vier, abre com o básico.
+async function abrirContatoExistente() {
+  const dados = contatoExistente;
+  fecharModal('modal-contato-existente');
+  contatoExistente = null;
+  if (!dados) return;
+  let contato = { id: dados.contactId, nome: dados.name, telefone: dados.phone };
+  try {
+    const res = await fetch(`${API}/api/contatos?q=${encodeURIComponent(String(dados.phone).replace(/\D/g, '').slice(-8))}`);
+    if (res.ok) contato = (await res.json()).find((c) => c.id === dados.contactId) || contato;
+  } catch (e) { /* abre com o básico */ }
+  abrirDetalheContatoAvulso(contato);
 }
 
 // Clicar num contato salvo tenta achar uma conversa existente com esse
@@ -368,26 +400,6 @@ async function carregarNovaConversaResultados(termo) {
 function iniciarConversaNova(telefone, nome) {
   fecharModal('modal-nova-conversa');
   abrirConversaPorTelefone(telefone, nome || '');
-}
-
-// Salva na agenda de contatos um número que veio num cartão de contato
-// compartilhado dentro da conversa (POST /api/contatos). Um clique, sem sair
-// da conversa — é o que a atendente antes só conseguia fazer pelo web.
-async function salvarContatoCompartilhado(botao, telefone, nome) {
-  const textoOriginal = botao ? botao.textContent : '';
-  if (botao) { botao.disabled = true; botao.textContent = 'Salvando…'; }
-  try {
-    const res = await fetch(`${API}/api/contatos`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ telefone, nome: nome || telefone }),
-    });
-    if (!res.ok) throw new Error('falhou');
-    if (botao) { botao.textContent = 'Contato salvo'; botao.style.opacity = '.7'; botao.style.cursor = 'default'; }
-  } catch (e) {
-    if (botao) { botao.disabled = false; botao.textContent = textoOriginal || 'Salvar contato'; }
-    alert('Não consegui salvar o contato agora. Tenta de novo em instantes.');
-  }
 }
 
 let progressoPeriodo = 'semana';
@@ -1382,27 +1394,110 @@ async function abrirConversa(leadId) {
   abrirModal('modal-conversa');
 }
 
+// Mensagem de contato compartilhado: marcada pelo servidor (midia_tipo
+// 'contato') ou, nas mensagens antigas, só pelo rótulo "[Contato] Nome".
+function ehContatoCompartilhado(m) {
+  if (!m || m.apagada) return false;
+  return m.midia_tipo === 'contato' || (!m.midia_tipo && /^\[Contato\]/i.test((m.texto || '').trim()));
+}
+
+// Telefone do cartão -> contato salvo em Clientes (ou null). Guardado por
+// telefone pra o polling da conversa não refazer a busca a cada redesenho.
+const contatosCompartilhadosVerificados = new Map();
+const contatosCompartilhadosEmBusca = new Set();
+
+// Reaproveita a busca de Clientes (GET /api/contatos?q=) pelos últimos 8
+// dígitos e confirma com chaveTelefone (ignora 55 e nono dígito), então
+// "5511987654321" encontra um contato salvo como "11987654321".
+async function buscarContatoSalvoPorTelefone(tel) {
+  const res = await fetch(`${API}/api/contatos?q=${encodeURIComponent(tel.slice(-8))}`);
+  if (!res.ok) throw new Error('busca de contatos falhou');
+  const contatos = await res.json();
+  const iguais = (contatos || []).filter((c) => chaveTelefone(c.telefone) === chaveTelefone(tel));
+  return iguais.find((c) => digitosTelefone(c.telefone) === tel) || iguais[0] || null;
+}
+
+async function verificarContatosCompartilhados() {
+  const pendentes = [...document.querySelectorAll('.midia-contato-acoes.is-verificando')];
+  const telefones = [...new Set(pendentes.map((el) => el.dataset.tel))]
+    .filter((tel) => !contatosCompartilhadosEmBusca.has(tel));
+  await Promise.all(telefones.map(async (tel) => {
+    contatosCompartilhadosEmBusca.add(tel);
+    try {
+      contatosCompartilhadosVerificados.set(tel, await buscarContatoSalvoPorTelefone(tel));
+    } catch (e) {
+      // Sem resposta da busca: mostra "Adicionar contato" nesta tela, mas tenta de novo no próximo desenho.
+      pintarBotoesContatoCompartilhado(tel, null);
+      return;
+    } finally {
+      contatosCompartilhadosEmBusca.delete(tel);
+    }
+    pintarBotoesContatoCompartilhado(tel, contatosCompartilhadosVerificados.get(tel));
+  }));
+}
+
+// Refaz a checagem Adicionar x Abrir contato dos cartões desse número.
+function reverificarCartoesContato(telefone) {
+  const tel = String(telefone).replace(/\D/g, '');
+  contatosCompartilhadosVerificados.delete(tel);
+  document.querySelectorAll('.midia-contato-acoes').forEach((el) => {
+    if (el.dataset.tel === tel) el.classList.add('is-verificando');
+  });
+  verificarContatosCompartilhados();
+}
+
+function pintarBotoesContatoCompartilhado(tel, contato) {
+  document.querySelectorAll('.midia-contato-acoes.is-verificando').forEach((el) => {
+    if (el.dataset.tel !== tel) return;
+    el.classList.remove('is-verificando');
+    el.innerHTML = botoesContatoCompartilhado(tel, el.dataset.nome, contato);
+  });
+}
+
+function botoesContatoCompartilhado(tel, nome, contato) {
+  const dados = `data-tel="${escapeHtml(tel)}" data-nome="${escapeHtml(nome)}"`;
+  const principal = contato
+    ? `<button type="button" class="ui-btn ui-btn--sm ui-btn--secondary" onclick="abrirContatoCompartilhado('${escapeHtml(tel)}')">${icone('user-round', 14)}Abrir contato</button>`
+    : `<button type="button" class="ui-btn ui-btn--sm ui-btn--secondary" ${dados} onclick="abrirSalvarContato(this.dataset.tel, this.dataset.nome)">${icone('user-round-plus', 14)}Adicionar contato</button>`;
+  return principal
+    + `<button type="button" class="ui-btn ui-btn--sm ui-btn--primary" ${dados} onclick="abrirConversaPorTelefone(this.dataset.tel, this.dataset.nome)">${icone('message-square', 14)}Iniciar conversa</button>`;
+}
+
+// Abre o painel lateral do cliente já salvo (o mesmo da tela Clientes).
+function abrirContatoCompartilhado(tel) {
+  const contato = contatosCompartilhadosVerificados.get(tel);
+  if (!contato) return;
+  abrirDetalheContatoAvulso(contato);
+}
+
+// 5511987654321 -> +55 11 98765-4321 (só exibição; o que é salvo continua só dígitos).
+function formatarTelefoneContato(tel) {
+  const d = String(tel || '').replace(/\D/g, '');
+  const m = /^(55)(\d{2})(\d{4,5})(\d{4})$/.exec(d);
+  return m ? `+${m[1]} ${m[2]} ${m[3]}-${m[4]}` : d;
+}
+
 function renderizarMidia(m) {
   // Contato COMPARTILHADO (vCard) — vem ANTES do check de midia_url porque
-  // não é arquivo: o número fica em contato_telefone. Vira um cartão clicável
-  // com "Iniciar conversa" e "Salvar contato", igual ao WhatsApp.
-  if (m.midia_tipo === 'contato') {
+  // não é arquivo: o número fica em contato_telefone. Vira um cartão com
+  // "Adicionar contato" e "Iniciar conversa", igual ao WhatsApp — sempre com
+  // o número DO CARTÃO, nunca o de quem enviou.
+  if (ehContatoCompartilhado(m)) {
     const tel = m.contato_telefone ? String(m.contato_telefone).replace(/\D/g, '') : '';
     const nome = (m.texto || '').replace(/^\[Contato\]\s*/i, '').trim() || tel || 'Contato';
-    const wrap = 'border:1px solid var(--border); border-radius:12px; padding:10px 12px; margin-bottom:6px; background:var(--card); max-width:260px;';
-    if (!tel) {
-      // Cartões recebidos ANTES desta atualização não têm o número guardado.
-      return `<div style="${wrap} display:flex; align-items:center; gap:8px;"><span class="midia-contato-icone">${icone('user', 16)}</span><div><div style="font-weight:600; color:var(--text);">${escapeHtml(nome)}</div><div style="font-size:12px; color:var(--muted); margin-top:2px;">Contato compartilhado</div></div></div>`;
-    }
-    const nomeEsc = escapeHtml(nome).replace(/'/g, "\\'");
-    const telEsc = escapeHtml(tel);
-    return `<div style="${wrap}">`
-      + `<div style="display:flex; align-items:center; gap:8px;"><span class="midia-contato-icone">${icone('user', 16)}</span>`
-      + `<div style="min-width:0;"><div style="font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(nome)}</div>`
-      + `<div style="font-size:12px; color:var(--muted);">${telEsc}</div></div></div>`
-      + `<div style="display:flex; gap:6px; margin-top:8px;">`
-      + `<button type="button" onclick="abrirConversaPorTelefone('${telEsc}','${nomeEsc}')" style="flex:1; background:var(--navy); color:#fff; border:none; border-radius:8px; padding:7px 8px; font-size:12px; font-weight:600; cursor:pointer;">Iniciar conversa</button>`
-      + `<button type="button" onclick="salvarContatoCompartilhado(this,'${telEsc}','${nomeEsc}')" style="flex:1; background:var(--card); color:var(--navy); border:1px solid var(--navy); border-radius:8px; padding:7px 8px; font-size:12px; font-weight:600; cursor:pointer;">Salvar contato</button>`
+    const cabecalho = `<div class="midia-contato-topo"><span class="midia-contato-avatar">${escapeHtml(iniciais(nome))}</span>`
+      + `<div class="midia-contato-info"><div class="midia-contato-nome">${escapeHtml(nome)}</div>`
+      + `<div class="midia-contato-tel">${icone('phone', 12)}${tel ? escapeHtml(formatarTelefoneContato(tel)) : 'Número não disponível'}</div></div></div>`;
+    // Cartões recebidos ANTES do número ser guardado: só o nome, sem ações.
+    if (!tel) return `<div class="midia-contato">${cabecalho}</div>`;
+    // Nome/telefone vão em data-* (não dentro do onclick) — nome com aspas não quebra o clique.
+    const dados = `data-tel="${escapeHtml(tel)}" data-nome="${escapeHtml(nome)}"`;
+    // Os botões só aparecem depois de saber se o número já está em Clientes
+    // (Adicionar x Abrir contato). Enquanto a busca não volta, a área fica reservada.
+    const verificado = contatosCompartilhadosVerificados.get(tel);
+    if (verificado === undefined) setTimeout(verificarContatosCompartilhados, 0);
+    return `<div class="midia-contato">${cabecalho}<div class="midia-contato-acoes${verificado === undefined ? ' is-verificando' : ''}" ${dados}>`
+      + (verificado === undefined ? '' : botoesContatoCompartilhado(tel, nome, verificado))
       + `</div></div>`;
   }
   if (!m.midia_url) return '';
@@ -1554,7 +1649,7 @@ function renderizarConversa(lead) {
       else if (m.status_entrega === 'entregue') checkHtml = `<span class="balao-check" title="Entregue">${icone('check-check', 14)}</span>`;
       else checkHtml = `<span class="balao-check" title="Enviado">${icone('check', 14)}</span>`;
     }
-    const textoHtml = textoSoRotulo ? '' : `<span class="balao-texto">${formatarTextoMensagem(m.texto)}${marcaEditada}</span>`;
+    const textoHtml = textoSoRotulo || ehContatoCompartilhado(m) ? '' : `<span class="balao-texto">${formatarTextoMensagem(m.texto)}${marcaEditada}</span>`;
     return `${separadorHtml}<div class="balao ${classe} ${classesExtras} ${m.apagada ? 'balao-apagada' : ''}" id="msg-${m.id}" title="${dataMsg.toLocaleString('pt-BR')}">${acoesHtml}${citacaoHtml}${renderizarMidia(m)}${textoHtml}<span class="balao-hora"><span class="hora-txt">${m.remetente === 'ia' ? 'IA · ' : ''}${hora}</span>${checkHtml}</span></div>`;
   }).join('');
   // Vai pro fim (última mensagem). Como as imagens têm altura 0 até carregar,
@@ -2213,36 +2308,58 @@ async function marcarComoNaoLida() {
   atualizarTudo();
 }
 
-function abrirSalvarContato() {
-  if (!leadConversaAtual) return;
-  document.getElementById('sc-nome').value = leadConversaAtual.nome_cliente || '';
+// Sem argumentos: salva o número da conversa aberta (botão do cabeçalho).
+// Com telefone/nome: salva o contato de um cartão compartilhado (vCard) —
+// o número do cartão, nunca o de quem mandou.
+let contatoParaSalvar = null;
+
+function abrirSalvarContato(telefone, nome) {
+  if (!leadConversaAtual && !telefone) return;
+  contatoParaSalvar = telefone
+    ? { telefone: String(telefone), nome: nome || '' }
+    : { telefone: leadConversaAtual.telefone, nome: leadConversaAtual.nome_cliente || '' };
+  document.getElementById('sc-nome').value = contatoParaSalvar.nome;
   document.getElementById('sc-erro').textContent = '';
   abrirModal('modal-salvar-contato');
 }
 
 async function confirmarSalvarContato() {
-  if (!leadConversaAtual) return;
+  if (!contatoParaSalvar) return;
   const nome = document.getElementById('sc-nome').value.trim();
   const erroEl = document.getElementById('sc-erro');
   if (!nome) {
     erroEl.textContent = 'Digite um nome.';
     return;
   }
+  const { telefone } = contatoParaSalvar;
   const res = await fetch(`${API}/api/contatos`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ telefone: leadConversaAtual.telefone, nome }),
+    body: JSON.stringify({ telefone, nome }),
   });
+  if (res.status === 409) {
+    const existente = await res.json();
+    fecharModal('modal-salvar-contato');
+    contatoParaSalvar = null;
+    reverificarCartoesContato(telefone); // o cartão desse número passa a mostrar "Abrir contato"
+    mostrarContatoExistente(existente);
+    return;
+  }
   if (!res.ok) {
     const err = await res.json();
     erroEl.textContent = err.erro || 'Erro ao salvar';
     return;
   }
   fecharModal('modal-salvar-contato');
-  leadConversaAtual.contato_salvo = true;
-  leadConversaAtual.nome_cliente = nome;
-  document.getElementById('conversa-titulo').textContent = nome;
-  document.getElementById('btn-salvar-contato').style.display = 'none';
+  contatoParaSalvar = null;
+  reverificarCartoesContato(telefone); // o cartão desse número passa a mostrar "Abrir contato"
+  // Só mexe no cabeçalho quando o número salvo é o da própria conversa.
+  if (leadConversaAtual && leadConversaAtual.telefone === telefone) {
+    leadConversaAtual.contato_salvo = true;
+    leadConversaAtual.nome_cliente = nome;
+    document.getElementById('conversa-titulo').textContent = nome;
+    document.getElementById('btn-salvar-contato').style.display = 'none';
+  }
   atualizarTudo();
 }
 
@@ -2294,6 +2411,21 @@ async function confirmarNovoLeadManual() {
     return;
   }
 
+  // Com nome, salva o contato ANTES de mexer na conversa: se o número já
+  // pertence a alguém, para aqui e mostra quem é — sem renomear nem duplicar.
+  if (nome_cliente) {
+    const resContato = await fetch(`${API}/api/contatos`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ telefone, nome: nome_cliente }),
+    });
+    if (resContato.status === 409) {
+      fecharModal('modal-novo-lead');
+      mostrarContatoExistente(await resContato.json());
+      return;
+    }
+  }
+
   const res = await fetch(`${API}/api/leads/manual`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2307,16 +2439,6 @@ async function confirmarNovoLeadManual() {
     return;
   }
   const resultado = await res.json();
-
-  // Já salva como contato de verdade também, se um nome foi informado —
-  // é exatamente o que esse botão promete fazer.
-  if (nome_cliente) {
-    fetch(`${API}/api/contatos`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ telefone, nome: nome_cliente }),
-    }).catch(() => {});
-  }
 
   fecharModal('modal-novo-lead');
   atualizarTudo();
