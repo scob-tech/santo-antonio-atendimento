@@ -30,6 +30,8 @@ function extensaoDe({ mime, tipo, nome }) {
     'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png', 'image/gif': 'gif',
     'image/webp': 'webp', 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a',
     'audio/amr': 'amr', 'video/mp4': 'mp4', 'application/pdf': 'pdf',
+    'audio/opus': 'ogg', 'audio/webm': 'webm', 'audio/aac': 'aac', 'audio/x-m4a': 'm4a',
+    'audio/m4a': 'm4a', 'audio/mp3': 'mp3', 'audio/wav': 'wav', 'audio/x-wav': 'wav',
   };
   if (mime && porMime[mime.toLowerCase()]) return porMime[mime.toLowerCase()];
   if (nome && nome.includes('.')) {
@@ -40,6 +42,40 @@ function extensaoDe({ mime, tipo, nome }) {
   return porTipo[tipo] || 'bin';
 }
 
+// Formato REAL de um áudio pelos primeiros bytes. A Z-API às vezes entrega
+// áudio com content-type genérico (application/octet-stream) ou de um tipo
+// que não estava no mapa acima, e ele acabava gravado como ".ogg" mesmo sendo
+// AAC/MP3/WebM — o Chrome até adivinha e toca, mas o Safari/iPhone confia no
+// tipo declarado e não toca (fica mudo). Devolve { ext, mime } ou null.
+function formatoAudioPorBytes(b) {
+  if (!b || b.length < 12) return null;
+  const txt = (ini, fim) => b.subarray(ini, fim).toString('latin1');
+  if (txt(0, 4) === 'OggS') return { ext: 'ogg', mime: 'audio/ogg' };
+  if (b[0] === 0x1A && b[1] === 0x45 && b[2] === 0xDF && b[3] === 0xA3) return { ext: 'webm', mime: 'audio/webm' };
+  if (txt(4, 8) === 'ftyp') return { ext: 'm4a', mime: 'audio/mp4' };
+  if (txt(0, 4) === 'RIFF' && txt(8, 12) === 'WAVE') return { ext: 'wav', mime: 'audio/wav' };
+  if (txt(0, 3) === 'ID3' || (b[0] === 0xFF && (b[1] & 0xE6) === 0xE2)) return { ext: 'mp3', mime: 'audio/mpeg' };
+  if (b[0] === 0xFF && (b[1] & 0xF6) === 0xF0) return { ext: 'aac', mime: 'audio/aac' };
+  if (txt(0, 6) === '#!AMR\n') return { ext: 'amr', mime: 'audio/amr' };
+  return null;
+}
+
+// Tipo real de um arquivo de áudio já salvo (lê só o começo do arquivo).
+// Usado pela rota /midia pra servir áudios ANTIGOS com o Content-Type certo,
+// sem precisar renomear nada nem mexer no banco.
+function mimeRealDoAudio(caminho) {
+  try {
+    const fd = fs.openSync(caminho, 'r');
+    const b = Buffer.alloc(16);
+    const lidos = fs.readSync(fd, b, 0, 16, 0);
+    fs.closeSync(fd);
+    const f = formatoAudioPorBytes(b.subarray(0, lidos));
+    return f ? f.mime : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 function nomeNovo(ext) {
   return `${Date.now().toString(36)}-${crypto.randomBytes(8).toString('hex')}.${ext}`;
 }
@@ -47,7 +83,9 @@ function nomeNovo(ext) {
 // Grava um Buffer como arquivo de mídia e devolve a referência ("/midia/...").
 function salvarBuffer(buffer, { mime, tipo, nome } = {}) {
   garantirPasta();
-  const ext = extensaoDe({ mime, tipo, nome });
+  const ehAudio = tipo === 'audio' || (mime || '').toLowerCase().startsWith('audio/');
+  const real = ehAudio ? formatoAudioPorBytes(buffer) : null;
+  const ext = real ? real.ext : extensaoDe({ mime, tipo, nome });
   const arquivo = nomeNovo(ext);
   fs.writeFileSync(path.join(MIDIA_DIR, arquivo), buffer);
   return PREFIXO_URL + arquivo;
@@ -93,9 +131,12 @@ function refParaDataUri(ref, { tipo } = {}) {
     if (!fs.existsSync(caminho)) return ref;
     const ext = (arquivo.split('.').pop() || '').toLowerCase();
     const mimePorExt = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif',
-      webp: 'image/webp', ogg: 'audio/ogg', mp3: 'audio/mpeg', m4a: 'audio/mp4', mp4: 'video/mp4', pdf: 'application/pdf' };
-    const mime = mimePorExt[ext] || 'application/octet-stream';
-    const base64 = fs.readFileSync(caminho).toString('base64');
+      webp: 'image/webp', ogg: 'audio/ogg', mp3: 'audio/mpeg', m4a: 'audio/mp4', mp4: 'video/mp4', pdf: 'application/pdf',
+      webm: 'audio/webm', wav: 'audio/wav', aac: 'audio/aac', amr: 'audio/amr' };
+    const conteudo = fs.readFileSync(caminho);
+    const real = tipo === 'audio' ? formatoAudioPorBytes(conteudo) : null;
+    const mime = real ? real.mime : (mimePorExt[ext] || 'application/octet-stream');
+    const base64 = conteudo.toString('base64');
     return `data:${mime};base64,${base64}`;
   } catch (e) {
     return ref;
@@ -114,4 +155,5 @@ function caminhoDoArquivo(nomeArquivo) {
 module.exports = {
   MIDIA_DIR, PREFIXO_URL, garantirPasta,
   salvarBuffer, salvarDataUri, salvarDeUrl, refParaDataUri, caminhoDoArquivo, extensaoDe,
+  formatoAudioPorBytes, mimeRealDoAudio,
 };

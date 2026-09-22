@@ -234,6 +234,13 @@ app.get('/api/setor-atual', (req, res) => {
 app.get('/midia/:arquivo', requireAuth, (req, res) => {
   const caminho = midia.caminhoDoArquivo(req.params.arquivo);
   if (!caminho) return res.status(404).json({ erro: 'mídia não encontrada' });
+  // Áudio: declara o tipo REAL (lido dos primeiros bytes), não o da extensão.
+  // Áudios antigos AAC/MP3/WebM gravados como ".ogg" iam como audio/ogg e
+  // o Safari/iPhone não tocava (ficava mudo). Demais mídias: igual antes.
+  if (/\.(ogg|opus|m4a|mp3|aac|amr|wav)$/i.test(caminho)) {
+    const mimeReal = midia.mimeRealDoAudio(caminho);
+    if (mimeReal) res.setHeader('Content-Type', mimeReal);
+  }
   res.sendFile(caminho);
 });
 
@@ -2090,9 +2097,22 @@ app.post('/api/contatos', requireAuth, (req, res) => {
   if (!telefone || !nome || !nome.trim()) {
     return res.status(400).json({ erro: 'telefone e nome são obrigatórios' });
   }
+  // Número já salvo (inclusive com/sem 55 ou nono dígito): não cria outro
+  // registro — devolve quem é o dono pra tela oferecer "Abrir contato".
+  const existente = db.buscarContatoEquivalente(telefone);
+  if (existente) return res.status(409).json(respostaContatoExistente(existente));
   db.salvarContato(telefone, nome.trim(), req.usuario.id);
   res.json({ ok: true });
 });
+
+function respostaContatoExistente(contato) {
+  return {
+    erro: `Este telefone já pertence ao contato ${contato.nome}.`,
+    contactId: contato.id,
+    name: contato.nome,
+    phone: contato.telefone,
+  };
+}
 
 // ---------------------------------------------------------------
 // ARMAZENAMENTO — relatório de espaço + compactação de mídia. A mídia que a
@@ -2251,7 +2271,8 @@ app.put('/api/contatos/:id', requireAuth, (req, res) => {
   const { nome, telefone } = req.body;
   if (!nome || !telefone) return res.status(400).json({ erro: 'nome e telefone são obrigatórios' });
   const r = db.editarContato(req.params.id, nome, telefone);
-  if (r.erro) return res.status(/já existe/.test(r.erro) ? 409 : 400).json(r);
+  if (r.conflito) return res.status(409).json(respostaContatoExistente(r.conflito));
+  if (r.erro) return res.status(400).json(r);
   res.json(r);
 });
 
