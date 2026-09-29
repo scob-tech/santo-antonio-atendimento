@@ -377,6 +377,36 @@ body[data-view="historico"] .chat-head-historico { display: flex; }
 body[data-view="historico"] #modal-conversa.pode-reabrir .chat-reabrir { display: inline-flex; }
 body[data-view="historico"] #conversa-acao-reabrir { display: none !important; }
 
+/* Pesquisa dentro da conversa (busca-conversa-ui.js) */
+#btn-busca-conversa.is-active { background: var(--brand-50); color: var(--brand-text); }
+.chat-busca {
+  display: flex; align-items: center; gap: 2px; flex-shrink: 0; padding: var(--space-2) 14px var(--space-2) 20px;
+  border-bottom: 1px solid var(--line); background: var(--surface); animation: scob-entrar .15s var(--ease);
+}
+.chat-busca[hidden] { display: none; }
+.chat-busca-campo {
+  display: flex; align-items: center; gap: var(--space-2); flex: 1; min-width: 0; height: 36px; padding: 0 var(--space-3);
+  margin-right: var(--space-2); border-radius: var(--radius-md); background: var(--surface-sunken); color: var(--ink-4);
+  transition: box-shadow .15s ease, background .15s ease;
+}
+.chat-busca-campo:focus-within { background: var(--surface); box-shadow: var(--ring-field); }
+.chat-busca-campo input {
+  flex: 1; min-width: 0; height: 100%; padding: 0; border: none; background: transparent; box-shadow: none;
+  font: 400 13.5px/1 var(--font-sans); color: var(--ink);
+}
+.chat-busca-campo input:focus { outline: none; box-shadow: none; }
+.chat-busca-campo input::-webkit-search-cancel-button { display: none; }
+.chat-busca-contador {
+  flex-shrink: 0; padding: 0 var(--space-2); font: 500 12px/1 var(--font-sans); color: var(--ink-3);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.chat-busca-contador.is-vazio { color: var(--ink-4); }
+.chat-busca .ui-icon-btn:disabled { opacity: .4; cursor: default; pointer-events: none; }
+#modal-conversa mark.busca-hit {
+  background: #FFE58A; color: #0F1728; border-radius: 3px; padding: 0 1px; box-shadow: 0 0 0 1px #FFE58A;
+}
+#modal-conversa mark.busca-hit.is-atual { background: #FFC83D; box-shadow: 0 0 0 2px #FFC83D; }
+
 /* Mensagens */
 .conversa-modal-mensagens {
   display: flex; flex-direction: column; gap: 0; flex: 1; min-height: 0; overflow-y: auto;
@@ -1536,6 +1566,9 @@ button:disabled { background: #D5D8DE; cursor: default; color: #8A8F98; }
   .chat-head { flex-wrap: wrap; row-gap: var(--space-2); padding: var(--space-2) var(--space-2) 10px 6px; min-height: 60px; gap: 6px; }
   .chat-contact .conv-avatar { display: none; }
   .chat-head-tools { margin-left: auto; box-shadow: none; }
+  .chat-contact-sub { overflow: hidden; } /* com a lupa no cabeçalho, o selo de status não passa por baixo dos botões */
+  .chat-busca { padding: 6px var(--space-2) 6px 10px; }
+  .chat-busca-contador { padding: 0 var(--space-1); font-size: 11.5px; }
   .chat-head-actions[style*="flex"] { order: 3; width: 100%; display: grid !important; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 0 2px; }
   .chat-head-actions .ui-btn { padding: 0 var(--space-2); background: var(--surface-sunken) !important; }
   .chat-head-actions .ui-btn .btn-label { display: inline; }

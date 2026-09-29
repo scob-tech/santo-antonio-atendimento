@@ -14,7 +14,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/scob.css?v=20260916s1" />
+<link rel="stylesheet" href="/scob.css?v=20260921s1" />
 </head>
 <body data-view="inicio">
   <div class="app-shell">
@@ -231,6 +231,7 @@
                   </div>
 
                   <div class="chat-head-tools">
+                    <button type="button" class="ui-icon-btn ui-icon-btn--sm" id="btn-busca-conversa" onclick="alternarBuscaConversa()" title="Pesquisar mensagens" aria-label="Pesquisar mensagens"><span data-icon="search" data-size="18"></span></button>
                     <button type="button" class="ui-icon-btn ui-icon-btn--sm" id="btn-salvar-contato" onclick="abrirSalvarContato()" style="display:none;" title="Salvar contato" aria-label="Salvar contato"><span data-icon="user-round-plus" data-size="18"></span></button>
                     <div class="chat-menu" id="chat-menu">
                       <button type="button" class="ui-icon-btn ui-icon-btn--sm" onclick="alternarMenuConversa(event)" title="Mais ações" aria-label="Mais ações"><span data-icon="ellipsis-vertical" data-size="18"></span></button>
@@ -243,6 +244,18 @@
                     </div>
                     <button type="button" class="ui-icon-btn ui-icon-btn--sm chat-close" onclick="fecharModal('modal-conversa')" title="Fechar conversa" aria-label="Fechar conversa"><span data-icon="x" data-size="18"></span></button>
                   </div>
+                </div>
+
+                <!-- Pesquisa dentro da conversa (busca-conversa-ui.js) -->
+                <div class="chat-busca" id="conversa-busca" role="search" hidden>
+                  <div class="chat-busca-campo">
+                    <span data-icon="search" data-size="16"></span>
+                    <input type="search" id="conversa-busca-campo" placeholder="Pesquisar mensagens" aria-label="Pesquisar mensagens" autocomplete="off" oninput="aoDigitarBuscaConversa()" onkeydown="teclaBuscaConversa(event)" />
+                  </div>
+                  <span class="chat-busca-contador" id="conversa-busca-contador" aria-live="polite"></span>
+                  <button type="button" class="ui-icon-btn ui-icon-btn--sm" id="conversa-busca-anterior" onclick="navegarBuscaConversa(-1)" title="Resultado anterior" aria-label="Resultado anterior" disabled><span data-icon="chevron-up" data-size="18"></span></button>
+                  <button type="button" class="ui-icon-btn ui-icon-btn--sm" id="conversa-busca-proximo" onclick="navegarBuscaConversa(1)" title="Próximo resultado" aria-label="Próximo resultado" disabled><span data-icon="chevron-down" data-size="18"></span></button>
+                  <button type="button" class="ui-icon-btn ui-icon-btn--sm" onclick="fecharBuscaConversa()" title="Fechar pesquisa" aria-label="Fechar pesquisa"><span data-icon="x" data-size="18"></span></button>
                 </div>
 
                 <div class="conversa-modal-mensagens" id="conversa-mensagens"></div>
@@ -830,6 +843,18 @@
     </div>
   </div>
 
+  <!-- Diálogo: telefone já pertence a um contato salvo (409 do cadastro) -->
+  <div class="modal-overlay" id="modal-contato-existente" role="alertdialog" aria-labelledby="ce-titulo" aria-describedby="ce-texto">
+    <div class="modal-box" style="max-width:380px;">
+      <h3 id="ce-titulo">Contato já existente</h3>
+      <p id="ce-texto" style="font-size:13.5px; line-height:1.5; color:var(--ink-2); margin:-4px 0 0;"></p>
+      <div class="modal-actions">
+        <button class="cancelar" onclick="fecharModal('modal-contato-existente')" style="flex:1;">Cancelar</button>
+        <button onclick="abrirContatoExistente()" style="flex:1;">Abrir contato</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modal: armazenamento (relatório de espaço + compactar mídia) -->
   <div class="modal-overlay" id="modal-armazenamento">
     <div class="modal-box" style="max-width:520px; width:92vw; display:flex; flex-direction:column; max-height:85vh;">
@@ -1039,12 +1064,14 @@
     </div>
   </aside>
 
-<script src="icons.js?v=20260916s1"></script>
+<script src="icons.js?v=20260921s1"></script>
 <script src="configuracoes-ui.js?v=20260916s1"></script>
 <script src="clientes-ui.js?v=20260916s1"></script>
 <script src="historico-ui.js?v=20260916s1"></script>
 <script src="agenda-ui.js?v=20260916s1"></script>
 <script src="inbox-ui.js?v=20260916s1"></script>
-<script src="app.js?v=20260916s1"></script>
+<script src="busca-conversa-ui.js?v=20260921s1"></script>
+<script src="audio-ogg.js?v=20260921s1"></script>
+<script src="app.js?v=20260921s1"></script>
 </body>
 </html>

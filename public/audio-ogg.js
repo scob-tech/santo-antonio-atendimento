@@ -149,13 +149,14 @@
     const cabecalho = codecPrivate && codecPrivate.length >= 19
       && new TextDecoder().decode(codecPrivate.subarray(0, 8)) === 'OpusHead'
       ? codecPrivate : cabecalhoOpus(canais);
-    const preSkip = new DataView(cabecalho.buffer, cabecalho.byteOffset).getUint16(10, true);
     const serial = (Math.random() * 0xFFFFFFFF) >>> 0;
     const paginas = [
       paginaOgg([cabecalho], { granulo: 0, serial, sequencia: 0, flags: 0x02 }),
       paginaOgg([tagsOpus()], { granulo: 0, serial, sequencia: 1, flags: 0 }),
     ];
-    let granulo = preSkip, sequencia = 2, lote = [], segmentos = 0;
+    // Granulo conta desde o 1º pacote: os pacotes do encoder já incluem as
+    // amostras de pre-skip, então começar em preSkip esticaria a duração.
+    let granulo = 0, sequencia = 2, lote = [], segmentos = 0;
     pacotes.forEach((p, i) => {
       const seg = Math.floor(p.length / 255) + 1;
       if (lote.length && segmentos + seg > 255) {

@@ -56,6 +56,7 @@ function fecharModal(id) {
   // atualização de rede atrasada pinta uma conversa "fantasma" por cima depois.
   if (id === 'modal-conversa') leadConversaIdAlvo = null;
   if (id === 'modal-conversa') aoMudarConversaAberta();
+  if (id === 'modal-conversa' && typeof fecharBuscaConversa === 'function') fecharBuscaConversa();
 }
 function abrirModal(id) {
   document.getElementById(id).classList.add('aberto');
@@ -1511,7 +1512,9 @@ function renderizarMidia(m) {
     return `<img class="midia-amp" data-midia-url="${url}" data-midia-tipo="imagem" src="${url}" style="max-width:200px; max-height:200px; border-radius:8px; margin-bottom:6px; display:block; cursor:zoom-in;" />`;
   }
   if (m.midia_tipo === 'audio') {
-    return `<audio controls src="${url}" style="max-width:220px; margin-bottom:6px; display:block;"></audio>`;
+    // preload=metadata: carrega só a duração (não baixa todos os áudios da
+    // conversa de uma vez, o que travava/silenciava players no celular).
+    return `<audio controls preload="metadata" src="${url}" style="max-width:220px; margin-bottom:6px; display:block;"></audio>`;
   }
   if (m.midia_tipo === 'video') {
     // Vídeo em miniatura (toca ali mesmo com os controles); a lupa abre ampliado.
@@ -1615,6 +1618,15 @@ function renderizarConversa(lead) {
   const porId = {};
   lead.mensagens.forEach((m) => { porId[m.id] = m; });
 
+  // Áudio/vídeo que a pessoa está ouvindo (ou pausou no meio): o redesenho
+  // por mensagem nova recriava o player e o som cortava / voltava pro 0:00.
+  // Guarda o elemento e devolve ele mesmo no lugar depois de redesenhar —
+  // reinserido na mesma hora, o navegador nem chega a pausar.
+  const midiasEmUso = [...msgsEl.querySelectorAll('audio, video')]
+    .filter((el) => !el.paused || el.currentTime > 0)
+    .map((el) => ({ el, balaoId: el.closest('.balao') && el.closest('.balao').id }))
+    .filter((x) => x.balaoId);
+
   msgsEl.innerHTML = lead.mensagens.map((m, i) => {
     const classe = m.remetente === 'cliente' ? 'balao-cliente' : m.remetente === 'ia' ? 'balao-ia' : 'balao-vendedor';
     const dataMsg = new Date(m.criado_em + 'Z');
@@ -1652,10 +1664,20 @@ function renderizarConversa(lead) {
     const textoHtml = textoSoRotulo || ehContatoCompartilhado(m) ? '' : `<span class="balao-texto">${formatarTextoMensagem(m.texto)}${marcaEditada}</span>`;
     return `${separadorHtml}<div class="balao ${classe} ${classesExtras} ${m.apagada ? 'balao-apagada' : ''}" id="msg-${m.id}" title="${dataMsg.toLocaleString('pt-BR')}">${acoesHtml}${citacaoHtml}${renderizarMidia(m)}${textoHtml}<span class="balao-hora"><span class="hora-txt">${m.remetente === 'ia' ? 'IA · ' : ''}${hora}</span>${checkHtml}</span></div>`;
   }).join('');
+  midiasEmUso.forEach(({ el, balaoId }) => {
+    const novo = document.getElementById(balaoId);
+    const alvo = novo && novo.querySelector(el.tagName.toLowerCase());
+    if (alvo && alvo.getAttribute('src') === el.getAttribute('src')) alvo.replaceWith(el);
+  });
+  if (typeof reaplicarBuscaConversa === 'function') reaplicarBuscaConversa();
   // Vai pro fim (última mensagem). Como as imagens têm altura 0 até carregar,
   // um scroll só "no fim" abre no meio da conversa — então re-scrolla depois
   // do frame, com um respiro, e a cada imagem que termina de carregar.
-  const irParaOFim = () => { msgsEl.scrollTop = msgsEl.scrollHeight; };
+  // Com a busca aberta, quem manda no scroll é a ocorrência selecionada.
+  const irParaOFim = () => {
+    if (typeof buscaConversaAtiva === 'function' && buscaConversaAtiva()) return;
+    msgsEl.scrollTop = msgsEl.scrollHeight;
+  };
   irParaOFim();
   requestAnimationFrame(irParaOFim);
   setTimeout(irParaOFim, 150);
@@ -1715,12 +1737,22 @@ async function alternarGravacaoAudio() {
     gravador = new MediaRecorder(stream);
 
     gravador.ondataavailable = (e) => pedacosAudio.push(e.data);
-    gravador.onstop = () => {
+    gravador.onstop = async () => {
       stream.getTracks().forEach((t) => t.stop());
-      const blob = new Blob(pedacosAudio, { type: 'audio/webm' });
+      // Rotula com o formato REAL da gravação (o Safari/iPhone grava MP4,
+      // não WebM). Chrome/Edge gravam WebM/Opus, que o WhatsApp não trata
+      // como nota de voz (chegava mudo) — reembala em OGG/Opus, o formato
+      // nativo do WhatsApp, sem reencodar. Se não der, manda o original.
+      const mimeGravado = (gravador.mimeType || 'audio/webm').split(';')[0];
+      let blob = new Blob(pedacosAudio, { type: mimeGravado });
+      let nome = mimeGravado === 'audio/mp4' ? 'audio.m4a' : mimeGravado === 'audio/ogg' ? 'audio.ogg' : 'audio.webm';
+      if (mimeGravado === 'audio/webm' && window.webmParaOgg) {
+        const ogg = await window.webmParaOgg(blob);
+        if (ogg) { blob = ogg; nome = 'audio.ogg'; }
+      }
       const leitor = new FileReader();
       leitor.onload = () => {
-        anexosSelecionados.push({ dataUri: leitor.result, tipo: 'audio', nome: 'audio.webm' });
+        anexosSelecionados.push({ dataUri: leitor.result, tipo: 'audio', nome });
         renderizarPreviewAnexos();
       };
       leitor.readAsDataURL(blob);
