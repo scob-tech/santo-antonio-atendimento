@@ -198,6 +198,9 @@ function mudarView(nome) {
   if (nome === 'progresso') carregarProgresso();
   if (nome === 'clientes') carregarContatos();
   if (nome === 'configuracoes') atualizarBotaoNotificacoes(); // switch de push reflete a inscrição real deste navegador
+  // Agenda e usuários atualizam sozinhos só a cada 30s — ao abrir a tela, busca na hora.
+  if (nome === 'agenda') carregarLembretes();
+  if (nome === 'configuracoes') carregarVendedores();
   fecharMenuMobile();
 }
 
@@ -1393,6 +1396,9 @@ async function abrirConversa(leadId) {
   cancelarResposta();
   renderizarConversa(lead);
   abrirModal('modal-conversa');
+  // Abrir a conversa = vê-la: zera o badge de não lida (antes isso era feito
+  // pelo próprio GET; agora é uma ação explícita — ver marcarVistoConversaAberta).
+  marcarVistoConversaAberta();
 }
 
 // Mensagem de contato compartilhado: marcada pelo servidor (midia_tipo
@@ -1963,6 +1969,7 @@ async function enviarMensagemConversa() {
 
     const atualizado = await (await fetch(`${API}/api/leads/${leadConversaAtual.id}`)).json();
     leadConversaAtual = atualizado;
+    marcarVistoConversaAberta(); // a pessoa está com a conversa aberta: conta como vista
     renderizarConversa(atualizado);
     carregarLeads();
   } finally {
@@ -2053,6 +2060,7 @@ async function enviarFigurinha(id) {
   if (!res.ok) { alert(d.erro || 'Não consegui enviar a figurinha.'); return; }
   const atualizado = await (await fetch(`${API}/api/leads/${leadConversaAtual.id}`)).json();
   leadConversaAtual = atualizado;
+  marcarVistoConversaAberta();
   renderizarConversa(atualizado);
   carregarLeads();
 }
@@ -2216,6 +2224,7 @@ async function puxarLeadDaConversa() {
   }
   const atualizado = await (await fetch(`${API}/api/leads/${leadConversaAtual.id}`)).json();
   leadConversaAtual = atualizado;
+  marcarVistoConversaAberta(); // depois de puxar, vira dono — marca como vista (como o GET antigo fazia)
   renderizarConversa(atualizado);
   atualizarTudo();
 }
@@ -2230,6 +2239,7 @@ async function reabrirLeadDaConversa() {
   }
   const atualizado = await (await fetch(`${API}/api/leads/${leadConversaAtual.id}`)).json();
   leadConversaAtual = atualizado;
+  marcarVistoConversaAberta();
   renderizarConversa(atualizado);
   atualizarTudo();
 }
@@ -2311,6 +2321,7 @@ async function confirmarEditarMensagem() {
   fecharModal('modal-editar-mensagem');
   const atualizado = await (await fetch(`${API}/api/leads/${leadConversaAtual.id}`)).json();
   leadConversaAtual = atualizado;
+  marcarVistoConversaAberta();
   renderizarConversa(atualizado);
 }
 
@@ -2325,6 +2336,7 @@ async function apagarMensagem(msgId) {
   }
   const atualizado = await (await fetch(`${API}/api/leads/${leadConversaAtual.id}`)).json();
   leadConversaAtual = atualizado;
+  marcarVistoConversaAberta();
   renderizarConversa(atualizado);
 }
 
@@ -2835,13 +2847,6 @@ function atualizarBadgeAgenda(quantidade) {
   badge.hidden = quantidade === 0;
   atualizarKpiTarefas(quantidade);
 }
-async function atualizarContadorPendentesAgenda() {
-  if (!setorAtivo) return;
-  const res = await fetch(`${API}/api/lembretes?status=pendentes&setor=${setorAtivo}`);
-  if (!res.ok) return;
-  const pendentes = await res.json();
-  atualizarBadgeAgenda(pendentes.length);
-}
 
 function mudarAbaAgenda(status) {
   abaAgendaAtual = status;
@@ -2914,49 +2919,190 @@ async function puxarLead(leadId) {
   atualizarTudo();
 }
 
+// ---------------- Conversa aberta: sincronização incremental ----------------
+// Antes, a cada 1s a tela baixava a conversa INTEIRA de novo (todo o
+// histórico) só pra comparar quantas mensagens tinha — era o maior consumo de
+// rede do sistema. Agora ela pergunta ao servidor "mudou algo desde a versão
+// X?" (GET /api/leads/:id/sincronizar) e recebe:
+//   - inalterado → nada a fazer (resposta de poucos bytes);
+//   - novas      → só as mensagens que chegaram depois da última que ela tem;
+//   - completo   → a conversa inteira (mudou mensagem antiga, ou a versão não
+//                  bateu por qualquer motivo — na dúvida vem tudo, nunca perde).
+// leadConversaAtual.versao/ultimo_id sempre correspondem exatamente às
+// mensagens que estão em leadConversaAtual.mensagens.
+let sincronizandoConversa = false; // trava: uma sincronização por vez, sem fila
+
 async function atualizarConversaAberta() {
+  if (sincronizandoConversa) return; // a anterior ainda não voltou — não empilha outra
+  sincronizandoConversa = true;
+  try {
+    await sincronizarConversaAberta();
+  } catch (err) {
+    // Rede caiu / servidor reiniciando: nada se perde, o próximo ciclo pede
+    // de novo a partir da mesma versão.
+    console.warn('Sincronização da conversa falhou (tenta de novo no próximo ciclo):', err);
+  } finally {
+    sincronizandoConversa = false;
+  }
+}
+
+function conversaAbertaAinda(base) {
+  const modal = document.getElementById('modal-conversa');
+  return modal.classList.contains('aberto') && leadConversaAtual === base && leadConversaIdAlvo === base.id;
+}
+
+async function sincronizarConversaAberta() {
   const modal = document.getElementById('modal-conversa');
   if (!modal.classList.contains('aberto') || !leadConversaAtual) return;
 
-  const idNoInicio = leadConversaAtual.id;
-  const res = await fetch(`${API}/api/leads/${idNoInicio}`);
-  if (!res.ok) return;
+  // "base" = o estado exato que a tela tem agora. Se, durante a espera, a
+  // pessoa trocou/fechou a conversa OU outra ação (enviar, puxar, editar...)
+  // já trocou leadConversaAtual por uma versão recarregada, a resposta é
+  // DESCARTADA — o próximo ciclo sincroniza a partir do estado novo. É o que
+  // impede resposta atrasada/fora de ordem de pintar por cima.
+  const base = leadConversaAtual;
+  const params = base.versao ? `?apos_id=${base.ultimo_id || 0}&versao=${encodeURIComponent(base.versao)}` : '';
+  const res = await fetch(`${API}/api/leads/${base.id}/sincronizar${params}`);
+  if (!res.ok || !conversaAbertaAinda(base)) return;
+  const sync = await res.json();
+  if (!conversaAbertaAinda(base)) return;
 
-  // DESCARTA a resposta se, durante o fetch, a pessoa trocou de conversa,
-  // encerrou/abriu outra, ou fechou o modal. Sem isso, a conversa antiga
-  // "piscava" por cima da nova e ainda apagava o que ela estava digitando.
-  if (!modal.classList.contains('aberto') || !leadConversaAtual
-      || leadConversaAtual.id !== idNoInicio || leadConversaIdAlvo !== idNoInicio) return;
+  if (sync.inalterado) {
+    // Ninguém escreveu nada — só mantém o "visto" em dia enquanto a conversa
+    // está aberta e visível (o badge "Aguardando resposta" depende disso).
+    if (Date.now() - vistoEnviadoEm > INTERVALO_VISTO_MS) marcarVistoConversaAberta();
+    return;
+  }
 
-  const atualizado = await res.json();
-  if (!modal.classList.contains('aberto') || !leadConversaAtual
-      || leadConversaAtual.id !== idNoInicio || leadConversaIdAlvo !== idNoInicio) return;
+  let mensagens;
+  if (sync.completo) {
+    mensagens = sync.mensagens;
+  } else {
+    // Só chegaram mensagens novas: junta no fim, mantendo a ordem por horário
+    // (mesma ordem do servidor).
+    mensagens = base.mensagens.concat(sync.novas || []);
+    mensagens.sort((a, b) => (a.criado_em < b.criado_em ? -1 : a.criado_em > b.criado_em ? 1 : 0));
+  }
+  const atualizado = { ...sync.lead, mensagens, versao: sync.versao, ultimo_id: sync.ultimo_id };
 
-  // Só re-renderiza se realmente chegou mensagem nova (ou mudou o status) —
-  // evita apagar o que o vendedor está digitando na caixa de resposta.
-  const tinhaAntes = leadConversaAtual.mensagens ? leadConversaAtual.mensagens.length : 0;
-  const temAgora = atualizado.mensagens ? atualizado.mensagens.length : 0;
-  if (temAgora !== tinhaAntes || atualizado.status !== leadConversaAtual.status) {
+  // Mesmo critério visual de antes: só redesenha se o CONJUNTO de mensagens
+  // mudou (chegou/saiu mensagem) ou mudou o status da conversa — redesenhar
+  // leva a conversa pro fim, então mudança só de "visto/entregue" numa
+  // mensagem antiga atualiza os dados sem mexer no que a pessoa está lendo.
+  const idsAntes = base.mensagens.map((m) => m.id).join(',');
+  const idsAgora = mensagens.map((m) => m.id).join(',');
+  leadConversaAtual = atualizado;
+  if (idsAgora !== idsAntes || atualizado.status !== base.status) {
     const campoTexto = document.getElementById('conversa-texto');
     const rascunho = campoTexto.value;
-    leadConversaAtual = atualizado;
     renderizarConversa(atualizado);
     campoTexto.value = rascunho;
     ajustarAlturaTextarea(campoTexto);
     renderizarPreviewAnexos(); // os anexos já selecionados (anexosSelecionados) continuam os mesmos, só repinta a prévia
   }
+  // Chegou mensagem com a conversa aberta na frente da pessoa: já conta como
+  // vista (era o que o GET antigo fazia sozinho a cada 1s).
+  if (idsAgora !== idsAntes) marcarVistoConversaAberta();
 }
 
-async function atualizarTudo() {
+// Marca a conversa aberta como vista (POST /api/leads/:id/visto). Só quando
+// ela está de fato na tela: painel aberto, é a conversa escolhida e a aba
+// está visível. O servidor só grava pra dono/gestor (mesma regra de antes).
+const INTERVALO_VISTO_MS = 30000;
+let vistoEnviadoEm = 0;
+async function marcarVistoConversaAberta() {
+  const modal = document.getElementById('modal-conversa');
+  if (!modal.classList.contains('aberto') || !leadConversaAtual || leadConversaIdAlvo !== leadConversaAtual.id) return;
+  if (!abaVisivel()) return;
+  vistoEnviadoEm = Date.now();
+  try {
+    await fetch(`${API}/api/leads/${leadConversaAtual.id}/visto`, { method: 'POST' });
+  } catch (err) {
+    vistoEnviadoEm = 0; // falhou: tenta de novo no próximo ciclo
+  }
+}
+
+// ---------------- Atualização automática das listas ----------------
+// O que cada dado precisa:
+//   A (rápido, 3s):  leads novos (fila) e conversas em andamento/histórico.
+//   B (lento, 30s):  vendedores, agenda (lembretes + badge) e meta — mudam
+//                    pouco; também recarregam na hora ao abrir a tela deles e
+//                    depois de qualquer ação (atualizarTudo).
+//   Conversa aberta: 1s, incremental (ver acima).
+// Tudo PARA quando a aba fica oculta (outra aba, navegador minimizado, tela
+// bloqueada) e volta com uma atualização completa imediata ao reaparecer.
+// As notificações push não dependem disso (vêm do servidor pro service worker).
+const INTERVALO_LISTAS_MS = 3000;
+const INTERVALO_LENTO_MS = 30000;
+const INTERVALO_CONVERSA_MS = 1000;
+
+function abaVisivel() {
+  return document.visibilityState !== 'hidden';
+}
+
+async function atualizarListasRapidas() {
+  await carregarLeads();
+  await carregarConversasAtivas();
+}
+
+async function atualizarTelaCompleta() {
   await carregarVendedores();
   await carregarLeads();
   await carregarConversasAtivas();
-  await carregarLembretes();
+  await carregarLembretes(); // já traz pendentes + concluídas e atualiza o badge da Agenda (a chamada extra de pendentes era repetida)
   await carregarMinhaMeta();
-  if (abaAgendaAtual !== 'pendentes') await atualizarContadorPendentesAgenda();
-  // atualizarConversaAberta() não roda mais aqui — tem o próprio intervalo,
-  // mais rápido, pra quem está de olho numa conversa não sentir demora
-  // esperando o resto da tela (vendedores/leads/lembretes) atualizar junto.
+}
+
+// Trava única das listas: nunca roda duas atualizações ao mesmo tempo (uma
+// requisição lenta não cria fila crescente). Pedido de atualização COMPLETA
+// que chega enquanto outra está rodando (ex: a pessoa puxou um lead) não se
+// perde: roda uma vez logo em seguida. Ciclo rápido ocupado só é pulado.
+const atualizacaoTela = { rodando: null, completaPendente: false };
+
+function agendarAtualizacao(completa) {
+  const st = atualizacaoTela;
+  if (st.rodando) {
+    if (completa) st.completaPendente = true;
+    return st.rodando;
+  }
+  st.rodando = (async () => {
+    let fazerCompleta = completa;
+    try {
+      do {
+        st.completaPendente = false;
+        try {
+          await (fazerCompleta ? atualizarTelaCompleta() : atualizarListasRapidas());
+        } catch (err) {
+          console.warn('Atualização automática falhou (tenta de novo no próximo ciclo):', err);
+        }
+        fazerCompleta = true;
+      } while (st.completaPendente);
+    } finally {
+      st.rodando = null;
+    }
+  })();
+  return st.rodando;
+}
+
+// Atualização completa — chamada depois das ações (puxar, encerrar, transferir...)
+// e ao voltar pra aba.
+function atualizarTudo() {
+  return agendarAtualizacao(true);
+}
+
+function aoVoltarParaAba() {
+  if (!abaVisivel()) return;
+  atualizarTudo();
+  atualizarConversaAberta();
+  marcarVistoConversaAberta();
+}
+
+function iniciarAtualizacaoAutomatica() {
+  setInterval(() => { if (abaVisivel()) agendarAtualizacao(false); }, INTERVALO_LISTAS_MS);
+  setInterval(() => { if (abaVisivel()) agendarAtualizacao(true); }, INTERVALO_LENTO_MS);
+  setInterval(() => { if (abaVisivel()) atualizarConversaAberta(); }, INTERVALO_CONVERSA_MS);
+  document.addEventListener('visibilitychange', aoVoltarParaAba);
+  window.addEventListener('online', aoVoltarParaAba); // internet voltou: sincroniza na hora
 }
 
 // ---------------- Notificação push ----------------
@@ -3111,6 +3257,5 @@ function fecharMenuMobile() {
   });
   atualizarTudo();
   abrirLeadDaUrlSeTiver();
-  setInterval(atualizarTudo, 3000); // atualiza sozinho a cada 3s (depois trocamos por realtime)
-  setInterval(atualizarConversaAberta, 1000); // conversa aberta atualiza mais rápido — é o que a pessoa está de olho na hora
+  iniciarAtualizacaoAutomatica(); // listas a cada 3s, dados lentos a cada 30s, conversa aberta a cada 1s (incremental) — pausa com a aba oculta
 })();

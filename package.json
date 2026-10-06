@@ -13,6 +13,7 @@
     "simulate-demo": "node scripts/simulate-demo.js"
   },
   "dependencies": {
+    "compression": "^1.8.2",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "express": "^4.22.2",

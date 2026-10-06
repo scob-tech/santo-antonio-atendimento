@@ -1,5 +1,6 @@
 // server.js
 const express = require('express');
+const compression = require('compression');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const path = require('path');
@@ -78,6 +79,11 @@ const midia = require('./midia');
 const SETOR = (process.env.SETOR || 'vendas').toLowerCase();
 
 const app = express();
+// Compressão gzip das respostas de texto (JSON, HTML, JS, CSS) — era a maior
+// parte do Network Egress do Railway: o painel consulta a API o tempo todo e
+// tudo saía sem compressão. O filtro padrão só comprime tipos compressíveis
+// (imagem, áudio, vídeo e PDF passam direto, já são comprimidos).
+app.use(compression());
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '20mb' }));
 app.use(cookieParser());
@@ -241,7 +247,12 @@ app.get('/midia/:arquivo', requireAuth, (req, res) => {
     const mimeReal = midia.mimeRealDoAudio(caminho);
     if (mimeReal) res.setHeader('Content-Type', mimeReal);
   }
-  res.sendFile(caminho);
+  // Cada arquivo de mídia nasce com nome aleatório e único (midia.js) e nunca
+  // é regravado — a mesma URL é sempre o mesmo conteúdo. Então o navegador
+  // pode guardar pra sempre, sem revalidar a cada vez que a conversa redesenha.
+  // "private": só o navegador de quem está logado guarda (nada de cache
+  // compartilhado no meio do caminho).
+  res.sendFile(caminho, { headers: { 'Cache-Control': 'private, max-age=31536000, immutable' } });
 });
 
 // ---------------------------------------------------------------
@@ -727,6 +738,16 @@ app.post('/webhook/zapi', processarWebhookMensagem);
 // (nome + interesse), sem telefone e sem conversa.
 // Busca por nome/telefone — pra achar conversa antiga (mesmo encerrada) e
 // continuar de onde parou. Vendedor só acha as próprias; gestor acha todas.
+// Listas de leads (atualizadas a cada poucos segundos pela tela): manda só as
+// colunas que as listas usam. Ficam de fora as do relatório/IA, que a tela das
+// listas não lê (resumo_ia, resultado, valor_venda, motivo_perda,
+// convertido_em, setor_id) — a conversa completa (GET /api/leads/:id) segue
+// com tudo.
+function camposDaLista(lead) {
+  const { resumo_ia, resultado, valor_venda, motivo_perda, convertido_em, setor_id, ...usados } = lead;
+  return usados;
+}
+
 app.get('/api/leads/buscar', requireAuth, (req, res) => {
   const termo = (req.query.q || '').trim();
   if (termo.length < 2) return res.json([]);
@@ -757,7 +778,7 @@ app.get('/api/leads/buscar', requireAuth, (req, res) => {
       const naoLidas = lead.visto_em
         ? db.prepare(`SELECT COUNT(*) AS n FROM mensagens WHERE lead_id = ? AND remetente = 'cliente' AND criado_em > ?`).get(lead.id, lead.visto_em).n
         : db.prepare(`SELECT COUNT(*) AS n FROM mensagens WHERE lead_id = ? AND remetente = 'cliente'`).get(lead.id).n;
-      return { ...lead, ultima_mensagem: ultima || null, restrito: false, dono, vendedor_nome: vendedor ? vendedor.nome : null, nao_lidas: naoLidas, contato_salvo: lead.is_grupo ? true : Boolean(db.getContatoPorTelefone(lead.telefone)) };
+      return { ...camposDaLista(lead), ultima_mensagem: ultima || null, restrito: false, dono, vendedor_nome: vendedor ? vendedor.nome : null, nao_lidas: naoLidas, contato_salvo: lead.is_grupo ? true : Boolean(db.getContatoPorTelefone(lead.telefone)) };
     });
 
   res.json(resultado);
@@ -829,7 +850,7 @@ app.get('/api/leads', requireAuth, (req, res) => {
       const naoLidas = lead.visto_em
         ? db.prepare(`SELECT COUNT(*) AS n FROM mensagens WHERE lead_id = ? AND remetente = 'cliente' AND criado_em > ?`).get(lead.id, lead.visto_em).n
         : db.prepare(`SELECT COUNT(*) AS n FROM mensagens WHERE lead_id = ? AND remetente = 'cliente'`).get(lead.id).n;
-      return { ...lead, ultima_mensagem: ultima || null, restrito: false, dono, vendedor_nome: vendedor ? vendedor.nome : null, nao_lidas: naoLidas, contato_salvo: lead.is_grupo ? true : Boolean(db.getContatoPorTelefone(lead.telefone)) };
+      return { ...camposDaLista(lead), ultima_mensagem: ultima || null, restrito: false, dono, vendedor_nome: vendedor ? vendedor.nome : null, nao_lidas: naoLidas, contato_salvo: lead.is_grupo ? true : Boolean(db.getContatoPorTelefone(lead.telefone)) };
     }
 
     // Versão restrita: só dados mínimos
@@ -848,27 +869,106 @@ app.get('/api/leads', requireAuth, (req, res) => {
   res.json(resultado);
 });
 
-app.get('/api/leads/:id', requireAuth, (req, res) => {
+// Lead que o usuário pode ver (mesma regra de sempre) — ou responde o erro e
+// devolve null. Usado pela conversa completa, pela sincronização e pelo "visto".
+function leadVisivel(req, res) {
   const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
-  if (!lead) return res.status(404).json({ erro: 'lead não encontrado' });
+  if (!lead) { res.status(404).json({ erro: 'lead não encontrado' }); return null; }
   if (!usuarioAcessaLead(req.usuario, lead)) {
-    return res.status(403).json({ erro: 'este lead é de um setor que você não acessa' });
+    res.status(403).json({ erro: 'este lead é de um setor que você não acessa' });
+    return null;
   }
-
   const dono = lead.vendedor_id === req.usuario.id || Boolean(lead.is_grupo);
   const podeVer = ehGestor(req.usuario) || dono || lead.status === 'novo';
   if (!podeVer) {
-    return res.status(403).json({ erro: 'este lead já está sendo atendido por outro vendedor' });
+    res.status(403).json({ erro: 'este lead já está sendo atendido por outro vendedor' });
+    return null;
   }
+  return { lead, dono };
+}
 
-  const mensagens = db.prepare('SELECT * FROM mensagens WHERE lead_id = ? ORDER BY criado_em ASC').all(req.params.id);
+// Dados do lead pra tela da conversa (sem as mensagens).
+function dadosLeadConversa(lead, dono) {
+  return { ...lead, dono, contato_salvo: lead.is_grupo ? true : Boolean(db.getContatoPorTelefone(lead.telefone)) };
+}
 
-  // Marca como "visto agora" — zera o badge de não lida pra quem abriu
-  if (dono || ehGestor(req.usuario)) {
-    db.prepare(`UPDATE leads SET visto_em = strftime('%Y-%m-%d %H:%M:%f','now') WHERE id = ?`).run(req.params.id);
+// "Versão" da conversa: impressão digital de TUDO que a tela mostra — cada
+// mensagem inteira (texto, mídia, status de entrega, editada/apagada...) e os
+// dados do lead (menos visto_em, que muda só por alguém estar olhando).
+// Qualquer mudança em qualquer mensagem muda a versão. Formato: "<msgs>.<lead>".
+const cryptoNode = require('crypto');
+function hashMensagens(mensagens) {
+  const h = cryptoNode.createHash('sha1');
+  for (const m of mensagens) h.update(JSON.stringify(m)).update('\n');
+  return h.digest('hex').slice(0, 16);
+}
+function hashLead(dadosLead) {
+  const { visto_em, ...resto } = dadosLead;
+  return cryptoNode.createHash('sha1').update(JSON.stringify(resto)).digest('hex').slice(0, 8);
+}
+function mensagensDaConversa(leadId) {
+  return db.prepare('SELECT * FROM mensagens WHERE lead_id = ? ORDER BY criado_em ASC').all(leadId);
+}
+function maiorId(mensagens) {
+  return mensagens.reduce((max, m) => (m.id > max ? m.id : max), 0);
+}
+
+// Conversa completa. Só LEITURA — não marca mais como visto (isso agora é o
+// POST /api/leads/:id/visto, chamado pela tela quando a pessoa de fato está
+// olhando). Antes este GET gravava visto_em a cada chamada, o que mudava a
+// resposta toda hora e impedia o navegador de reaproveitar (304).
+app.get('/api/leads/:id', requireAuth, (req, res) => {
+  const v = leadVisivel(req, res);
+  if (!v) return;
+  const mensagens = mensagensDaConversa(v.lead.id);
+  const dados = dadosLeadConversa(v.lead, v.dono);
+  res.json({ ...dados, mensagens, versao: `${hashMensagens(mensagens)}.${hashLead(dados)}`, ultimo_id: maiorId(mensagens) });
+});
+
+// Sincronização INCREMENTAL da conversa aberta (o polling rápido da tela).
+// A tela manda o que já tem: apos_id (maior id de mensagem que ela tem) e
+// versao (a versão que recebeu junto). Respostas:
+//   - nada mudou            → { inalterado: true, versao }        (poucos bytes)
+//   - só chegaram mensagens → { novas: [...], lead, versao, ultimo_id }
+//   - mudou mensagem antiga (status de entrega, edição, exclusão) ou a versão
+//     não confere por qualquer motivo → { completo: true, mensagens: [...], ... }
+// Na dúvida o servidor manda tudo — nunca existe caminho que perca mensagem.
+app.get('/api/leads/:id/sincronizar', requireAuth, (req, res) => {
+  const v = leadVisivel(req, res);
+  if (!v) return;
+  const mensagens = mensagensDaConversa(v.lead.id);
+  const dados = dadosLeadConversa(v.lead, v.dono);
+  const versaoMsgs = hashMensagens(mensagens);
+  const versao = `${versaoMsgs}.${hashLead(dados)}`;
+  const ultimo_id = maiorId(mensagens);
+  const versaoCliente = String(req.query.versao || '');
+  const aposId = Number(req.query.apos_id);
+
+  if (versaoCliente === versao) return res.json({ inalterado: true, versao });
+
+  const [msgsCliente] = versaoCliente.split('.');
+  if (Number.isInteger(aposId) && aposId >= 0 && msgsCliente) {
+    const jaConhecidas = mensagens.filter((m) => m.id <= aposId);
+    if (hashMensagens(jaConhecidas) === msgsCliente) {
+      const novas = mensagens.filter((m) => m.id > aposId);
+      return res.json({ lead: dados, novas, versao, ultimo_id });
+    }
   }
+  res.json({ completo: true, lead: dados, mensagens, versao, ultimo_id });
+});
 
-  res.json({ ...lead, mensagens, dono, contato_salvo: lead.is_grupo ? true : Boolean(db.getContatoPorTelefone(lead.telefone)) });
+// Marca a conversa como VISTA agora — zera o badge de não lida. Mesma regra
+// de antes (só o dono ou gestor marca), mas agora é uma ação explícita da
+// tela: ao abrir a conversa, quando chega mensagem nova com ela aberta, e de
+// tempos em tempos enquanto ela está aberta e visível.
+app.post('/api/leads/:id/visto', requireAuth, (req, res) => {
+  const v = leadVisivel(req, res);
+  if (!v) return;
+  if (v.dono || ehGestor(req.usuario)) {
+    db.prepare(`UPDATE leads SET visto_em = strftime('%Y-%m-%d %H:%M:%f','now') WHERE id = ?`).run(v.lead.id);
+    return res.json({ ok: true, marcado: true });
+  }
+  res.json({ ok: true, marcado: false });
 });
 
 // Marca como não lida de propósito — útil pra "lembrar de responder depois".
