@@ -456,6 +456,17 @@ module.exports.getContatoPorTelefone = function (telefone) {
   return db.prepare(`SELECT * FROM contatos WHERE telefone = ?`).get(limpo);
 };
 
+// Contato já salvo com um número EQUIVALENTE (com/sem o 55, com/sem o nono
+// dígito) — ou undefined. Usado pelo POST /api/contatos pra não criar um
+// segundo cadastro do mesmo número escrito de outro jeito. Só leitura.
+module.exports.buscarContatoEquivalente = function (telefone) {
+  const formas = new Set(module.exports.variantesTelefone(telefone));
+  for (const v of [...formas]) if (v.startsWith('55')) formas.add(v.slice(2));
+  const lista = [...formas].filter(Boolean);
+  if (!lista.length) return undefined;
+  return db.prepare(`SELECT * FROM contatos WHERE telefone IN (${lista.map(() => '?').join(',')}) ORDER BY id ASC LIMIT 1`).get(...lista);
+};
+
 // Salva (ou atualiza) o nome de um contato, e já atualiza o nome exibido
 // em todo lead existente com esse telefone — sem isso, a conversa
 // continuaria mostrando o nome antigo (do WhatsApp) ao lado do nome novo

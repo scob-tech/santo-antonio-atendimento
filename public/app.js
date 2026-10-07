@@ -1602,7 +1602,9 @@ function rotuloDiaConversa(data) {
   return data.toLocaleDateString('pt-BR', opcoes);
 }
 
-function renderizarConversa(lead) {
+// opcoes.manterRolagem: redesenha sem levar a conversa pro fim — usado quando
+// só mudou o conteúdo de uma mensagem que já estava na tela (ex: editada).
+function renderizarConversa(lead, opcoes = {}) {
   const nome = lead.nome_cliente || lead.telefone;
   document.getElementById('conversa-titulo').textContent = nome;
   const avatarEl = document.getElementById('conversa-avatar');
@@ -1633,6 +1635,7 @@ function renderizarConversa(lead) {
     .map((el) => ({ el, balaoId: el.closest('.balao') && el.closest('.balao').id }))
     .filter((x) => x.balaoId);
 
+  const rolagemAntes = msgsEl.scrollTop;
   msgsEl.innerHTML = lead.mensagens.map((m, i) => {
     const classe = m.remetente === 'cliente' ? 'balao-cliente' : m.remetente === 'ia' ? 'balao-ia' : 'balao-vendedor';
     const dataMsg = new Date(m.criado_em + 'Z');
@@ -1657,8 +1660,12 @@ function renderizarConversa(lead) {
       citacaoHtml = `<span class="balao-citacao" onclick="irParaMensagem(${original.id})"><span class="balao-citacao-autor">${escapeHtml(autorOriginal)}</span><span class="balao-citacao-texto">${escapeHtml(original.texto.replace(/^\*(.+?):\*\n/, '$1: '))}</span></span>`;
     }
 
-    const podeEditarApagar = m.remetente === 'vendedor' && !m.apagada;
-    const acoesHtml = `<span class="balao-acoes"><span class="balao-btn-responder" onclick="iniciarResposta(${m.id})" title="Responder">${icone('reply', 14)}</span><span class="balao-btn-responder" onclick="abrirEncaminhar(${m.id})" title="Encaminhar">${icone('forward', 14)}</span>${podeEditarApagar ? `<span class="balao-btn-responder" onclick="abrirEditarMensagem(${m.id})" title="Editar">${icone('pencil', 14)}</span>` : ''}${podeEditarApagar ? `<span class="balao-btn-responder balao-btn-responder--danger" onclick="apagarMensagem(${m.id})" title="Apagar">${icone('trash-2', 14)}</span>` : ''}</span>`;
+    const podeApagar = m.remetente === 'vendedor' && !m.apagada;
+    // Editar só aparece onde a edição chega de verdade ao WhatsApp do cliente:
+    // mensagem de texto enviada por este sistema (tem o id do WhatsApp). O
+    // prazo do WhatsApp é conferido ao clicar.
+    const podeEditar = podeApagar && !m.midia_url && Boolean(m.zapi_message_id);
+    const acoesHtml = `<span class="balao-acoes"><span class="balao-btn-responder" onclick="iniciarResposta(${m.id})" title="Responder">${icone('reply', 14)}</span><span class="balao-btn-responder" onclick="abrirEncaminhar(${m.id})" title="Encaminhar">${icone('forward', 14)}</span>${podeEditar ? `<span class="balao-btn-responder" onclick="abrirEditarMensagem(${m.id})" title="Editar">${icone('pencil', 14)}</span>` : ''}${podeApagar ? `<span class="balao-btn-responder balao-btn-responder--danger" onclick="apagarMensagem(${m.id})" title="Apagar">${icone('trash-2', 14)}</span>` : ''}</span>`;
     const marcaEditada = m.editada && !m.apagada ? '<span style="opacity:.6; font-size:10px;"> (editada)</span>' : '';
 
     let checkHtml = '';
@@ -1684,11 +1691,15 @@ function renderizarConversa(lead) {
     if (typeof buscaConversaAtiva === 'function' && buscaConversaAtiva()) return;
     msgsEl.scrollTop = msgsEl.scrollHeight;
   };
-  irParaOFim();
-  requestAnimationFrame(irParaOFim);
-  setTimeout(irParaOFim, 150);
-  setTimeout(irParaOFim, 500);
-  msgsEl.querySelectorAll('img').forEach((img) => { if (!img.complete) img.addEventListener('load', irParaOFim, { once: true }); });
+  if (opcoes.manterRolagem) {
+    msgsEl.scrollTop = rolagemAntes;
+  } else {
+    irParaOFim();
+    requestAnimationFrame(irParaOFim);
+    setTimeout(irParaOFim, 150);
+    setTimeout(irParaOFim, 500);
+    msgsEl.querySelectorAll('img').forEach((img) => { if (!img.complete) img.addEventListener('load', irParaOFim, { once: true }); });
+  }
 
   const claimBox = document.getElementById('conversa-acao-claim');
   const respostaBox = document.getElementById('conversa-caixa-resposta');
@@ -2296,33 +2307,70 @@ function abrirEditarMensagem(msgId) {
   if (!leadConversaAtual) return;
   const msg = leadConversaAtual.mensagens.find((m) => m.id === msgId);
   if (!msg) return;
+  // Prazo do WhatsApp pra editar: vem do servidor (/api/me, único lugar onde
+  // o valor é definido). Esta conta só evita abrir o diálogo pra algo que já
+  // não dá mais — quem decide de verdade é o servidor.
+  const prazoMin = usuarioAtual && usuarioAtual.janela_edicao_min;
+  const enviadaEm = new Date(msg.criado_em + 'Z').getTime();
+  if (prazoMin && Date.now() - enviadaEm > prazoMin * 60 * 1000) {
+    alert(`O WhatsApp só permite editar uma mensagem até ${prazoMin} minutos depois do envio. Essa já passou do prazo — se precisar corrigir, mande uma nova mensagem.`);
+    return;
+  }
   msgEmEdicao = msgId;
   document.getElementById('em-texto').value = msg.texto.replace(/^\*(.+?):\*\n/, '');
   document.getElementById('em-erro').textContent = '';
   abrirModal('modal-editar-mensagem');
 }
 
+// Edita no WhatsApp do cliente; o servidor só grava depois que a Z-API
+// confirma. Enquanto espera: botão travado ("Editando…"), sem clique duplo.
+// Se falhar, o diálogo continua aberto com o motivo e a mensagem fica igual.
+let editandoMensagem = false;
 async function confirmarEditarMensagem() {
-  if (!leadConversaAtual || !msgEmEdicao) return;
+  if (!leadConversaAtual || !msgEmEdicao || editandoMensagem) return;
   const texto = document.getElementById('em-texto').value.trim();
   const erroEl = document.getElementById('em-erro');
   if (!texto) { erroEl.textContent = 'Não pode ficar em branco.'; return; }
 
-  const res = await fetch(`${API}/api/leads/${leadConversaAtual.id}/mensagens/${msgEmEdicao}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ texto }),
-  });
-  if (!res.ok) {
-    const err = await res.json();
-    erroEl.textContent = err.erro || 'Erro ao editar';
-    return;
+  const leadId = leadConversaAtual.id;
+  const botao = document.getElementById('em-salvar');
+  const textoBotao = botao ? botao.textContent : '';
+  editandoMensagem = true;
+  erroEl.textContent = '';
+  if (botao) { botao.disabled = true; botao.textContent = 'Editando no WhatsApp…'; }
+  const controle = new AbortController();
+  const timer = setTimeout(() => controle.abort(), 25000); // servidor desiste da Z-API em 15s
+  try {
+    let res;
+    try {
+      res = await fetch(`${API}/api/leads/${leadId}/mensagens/${msgEmEdicao}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ texto }),
+        signal: controle.signal,
+      });
+    } catch (e) {
+      erroEl.textContent = 'Sem resposta do servidor — não dá pra confirmar se a edição chegou ao WhatsApp. Confira a conversa e, se precisar, tente de novo.';
+      return;
+    }
+    if (!res.ok) {
+      erroEl.textContent = await lerErroDaResposta(res, 'Não foi possível editar a mensagem');
+      return;
+    }
+    fecharModal('modal-editar-mensagem');
+    msgEmEdicao = null;
+    mostrarAvisoRapido('Mensagem editada no WhatsApp');
+    if (!leadConversaAtual || leadConversaAtual.id !== leadId) return; // trocou de conversa no meio
+    const atualizado = await (await fetch(`${API}/api/leads/${leadId}`)).json();
+    if (!leadConversaAtual || leadConversaAtual.id !== leadId) return;
+    leadConversaAtual = atualizado;
+    marcarVistoConversaAberta();
+    renderizarConversa(atualizado, { manterRolagem: true });
+  } finally {
+    clearTimeout(timer);
+    editandoMensagem = false;
+    if (botao) { botao.disabled = false; botao.textContent = textoBotao; }
   }
-  fecharModal('modal-editar-mensagem');
-  const atualizado = await (await fetch(`${API}/api/leads/${leadConversaAtual.id}`)).json();
-  leadConversaAtual = atualizado;
-  marcarVistoConversaAberta();
-  renderizarConversa(atualizado);
 }
 
 async function apagarMensagem(msgId) {
@@ -2367,8 +2415,33 @@ function abrirSalvarContato(telefone, nome) {
   abrirModal('modal-salvar-contato');
 }
 
+// Aviso rápido no rodapé da tela (some sozinho) — confirmação visual de ações
+// que fecham o diálogo, como "Contato salvo".
+function mostrarAvisoRapido(texto, tipo = 'ok') {
+  const aviso = document.createElement('div');
+  aviso.setAttribute('role', 'status');
+  aviso.textContent = texto;
+  aviso.style.cssText = `position:fixed; left:50%; bottom:28px; transform:translateX(-50%); z-index:1000;
+    background:${tipo === 'erro' ? '#B42318' : 'var(--brand)'}; color:#fff; padding:10px 18px;
+    border-radius:var(--radius-pill); font-size:14px; box-shadow:0 6px 20px rgba(16,24,40,.25); max-width:90vw; text-align:center;`;
+  document.body.appendChild(aviso);
+  setTimeout(() => aviso.remove(), 3000);
+}
+
+// Lê a mensagem de erro de uma resposta da API sem quebrar quando ela não vem
+// em JSON (ex: erro 500 em HTML) — antes isso estourava uma exceção e o botão
+// "não fazia nada", sem nenhum aviso pra pessoa.
+async function lerErroDaResposta(res, padrao) {
+  try {
+    const corpo = await res.json();
+    if (corpo && corpo.erro) return corpo.erro;
+  } catch (e) { /* resposta não era JSON */ }
+  return `${padrao} (erro ${res.status}).`;
+}
+
+let salvandoContato = false;
 async function confirmarSalvarContato() {
-  if (!contatoParaSalvar) return;
+  if (!contatoParaSalvar || salvandoContato) return; // clique duplo enquanto salva: ignora
   const nome = document.getElementById('sc-nome').value.trim();
   const erroEl = document.getElementById('sc-erro');
   if (!nome) {
@@ -2376,35 +2449,52 @@ async function confirmarSalvarContato() {
     return;
   }
   const { telefone } = contatoParaSalvar;
-  const res = await fetch(`${API}/api/contatos`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ telefone, nome }),
-  });
-  if (res.status === 409) {
-    const existente = await res.json();
+  const botao = document.getElementById('sc-salvar');
+  const textoBotao = botao ? botao.textContent : '';
+  salvandoContato = true;
+  erroEl.textContent = '';
+  if (botao) { botao.disabled = true; botao.textContent = 'Salvando…'; }
+  try {
+    let res;
+    try {
+      res = await fetch(`${API}/api/contatos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ telefone, nome }),
+      });
+    } catch (e) {
+      erroEl.textContent = 'Sem conexão com o servidor — o contato não foi salvo. Tente de novo.';
+      return;
+    }
+    if (res.status === 409) {
+      const existente = await res.json().catch(() => null);
+      if (!existente) { erroEl.textContent = 'Esse número já está salvo em outro contato.'; return; }
+      fecharModal('modal-salvar-contato');
+      contatoParaSalvar = null;
+      reverificarCartoesContato(telefone); // o cartão desse número passa a mostrar "Abrir contato"
+      mostrarContatoExistente(existente);
+      return;
+    }
+    if (!res.ok) {
+      erroEl.textContent = await lerErroDaResposta(res, 'Não foi possível salvar o contato');
+      return;
+    }
     fecharModal('modal-salvar-contato');
     contatoParaSalvar = null;
     reverificarCartoesContato(telefone); // o cartão desse número passa a mostrar "Abrir contato"
-    mostrarContatoExistente(existente);
-    return;
+    // Só mexe no cabeçalho quando o número salvo é o da própria conversa.
+    if (leadConversaAtual && leadConversaAtual.telefone === telefone) {
+      leadConversaAtual.contato_salvo = true;
+      leadConversaAtual.nome_cliente = nome;
+      document.getElementById('conversa-titulo').textContent = nome;
+      document.getElementById('btn-salvar-contato').style.display = 'none';
+    }
+    mostrarAvisoRapido(`Contato salvo: ${nome}`);
+    atualizarTudo();
+  } finally {
+    salvandoContato = false;
+    if (botao) { botao.disabled = false; botao.textContent = textoBotao; }
   }
-  if (!res.ok) {
-    const err = await res.json();
-    erroEl.textContent = err.erro || 'Erro ao salvar';
-    return;
-  }
-  fecharModal('modal-salvar-contato');
-  contatoParaSalvar = null;
-  reverificarCartoesContato(telefone); // o cartão desse número passa a mostrar "Abrir contato"
-  // Só mexe no cabeçalho quando o número salvo é o da própria conversa.
-  if (leadConversaAtual && leadConversaAtual.telefone === telefone) {
-    leadConversaAtual.contato_salvo = true;
-    leadConversaAtual.nome_cliente = nome;
-    document.getElementById('conversa-titulo').textContent = nome;
-    document.getElementById('btn-salvar-contato').style.display = 'none';
-  }
-  atualizarTudo();
 }
 
 // fechou: true = fechou pedido | false = não fechou | null = não informar (IA decide depois)
@@ -2991,11 +3081,16 @@ async function sincronizarConversaAberta() {
   // mensagem antiga atualiza os dados sem mexer no que a pessoa está lendo.
   const idsAntes = base.mensagens.map((m) => m.id).join(',');
   const idsAgora = mensagens.map((m) => m.id).join(',');
+  // Conteúdo visível de cada mensagem (texto, editada, apagada, anexo): se
+  // mudou numa mensagem que já estava na tela (ex: editada por outra pessoa
+  // ou pelo celular), redesenha SEM levar a conversa pro fim.
+  const conteudo = (lista) => lista.map((m) => `${m.id}\u0001${m.texto}\u0001${m.editada}\u0001${m.apagada}\u0001${m.midia_url || ''}`).join('\u0002');
+  const mudouConteudo = idsAgora === idsAntes && conteudo(mensagens) !== conteudo(base.mensagens);
   leadConversaAtual = atualizado;
-  if (idsAgora !== idsAntes || atualizado.status !== base.status) {
+  if (idsAgora !== idsAntes || atualizado.status !== base.status || mudouConteudo) {
     const campoTexto = document.getElementById('conversa-texto');
     const rascunho = campoTexto.value;
-    renderizarConversa(atualizado);
+    renderizarConversa(atualizado, { manterRolagem: mudouConteudo && atualizado.status === base.status });
     campoTexto.value = rascunho;
     ajustarAlturaTextarea(campoTexto);
     renderizarPreviewAnexos(); // os anexos já selecionados (anexosSelecionados) continuam os mesmos, só repinta a prévia

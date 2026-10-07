@@ -22,6 +22,11 @@ const CRED = {
 
 const configurado = Boolean(CRED.instanceId && CRED.token);
 
+// Endereço da API. Em produção é sempre o da Z-API; ZAPI_BASE_URL só existe
+// pra testes locais apontarem pra um servidor falso (sem mandar nada pra
+// cliente de verdade).
+const ZAPI_BASE = (process.env.ZAPI_BASE_URL || 'https://api.z-api.io').replace(/\/+$/, '');
+
 // TRAVA DE ISOLAMENTO: este sistema só aceita mensagens da SUA própria
 // instância da Z-API. Se por engano chegar um webhook de outra instância
 // (ex: um link "Ao receber" apontado pra cá por erro), a mensagem é
@@ -171,7 +176,7 @@ async function enviarMensagemWhatsapp(telefone, texto, setor = null, citarMessag
     return { enviado: false, motivo: 'zapi_nao_configurada' };
   }
 
-  const url = `https://api.z-api.io/instances/${cred.instanceId}/token/${cred.token}/send-text`;
+  const url = `${ZAPI_BASE}/instances/${cred.instanceId}/token/${cred.token}/send-text`;
   const headers = { 'Content-Type': 'application/json' };
   if (cred.clientToken) headers['Client-Token'] = cred.clientToken;
   const body = { phone: telefone, message: texto };
@@ -193,6 +198,50 @@ async function enviarMensagemWhatsapp(telefone, texto, setor = null, citarMessag
   }
 }
 
+// EDITA uma mensagem de texto já enviada, no WhatsApp do cliente — mesmo
+// endpoint send-text, com o atributo editMessageId (documentado em
+// https://developer.z-api.io/message/send-text.md: "permite editar mensagens
+// enviadas anteriormente no WhatsApp. Use o ID da mensagem e o novo conteúdo").
+// Diferente do envio, aqui o chamador PRECISA saber se deu certo antes de
+// mexer no banco, então devolve { editado: true } só com resposta 2xx da
+// Z-API. Tem tempo-limite: se a Z-API não responder, devolve
+// motivo 'timeout' (resultado incerto — a edição pode ter sido aplicada).
+const TEMPO_LIMITE_EDICAO_MS = 15000;
+async function editarMensagemWhatsapp(telefone, messageIdOriginal, novoTexto) {
+  if (!configurado) return { editado: false, motivo: 'zapi_nao_configurada' };
+  if (!messageIdOriginal) return { editado: false, motivo: 'sem_id_whatsapp' };
+
+  const url = `${ZAPI_BASE}/instances/${CRED.instanceId}/token/${CRED.token}/send-text`;
+  const headers = { 'Content-Type': 'application/json' };
+  if (CRED.clientToken) headers['Client-Token'] = CRED.clientToken;
+  const body = { phone: telefone, message: novoTexto, editMessageId: messageIdOriginal };
+
+  const controle = new AbortController();
+  const timer = setTimeout(() => controle.abort(), TEMPO_LIMITE_EDICAO_MS);
+  try {
+    const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: controle.signal });
+    if (!res.ok) {
+      const detalhe = await res.text().catch(() => '');
+      console.error(`>> Z-API recusou a edição (status ${res.status}): ${detalhe}`);
+      return { editado: false, motivo: 'erro_zapi', status: res.status, detalhe: detalhe.slice(0, 300) };
+    }
+    const data = await res.json().catch(() => null);
+    // O WhatsApp devolve o "eco" da edição pelo webhook — registra o id pra
+    // ele ser reconhecido como nosso (não virar mensagem nova na conversa).
+    if (data && data.messageId) registrarComoEnviadaPorNos(data.messageId);
+    return { editado: true, messageId: data ? data.messageId : null };
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      console.error(`>> Z-API não respondeu a edição em ${TEMPO_LIMITE_EDICAO_MS / 1000}s`);
+      return { editado: false, motivo: 'timeout' };
+    }
+    console.error('>> Erro de rede ao editar mensagem na Z-API:', err.message);
+    return { editado: false, motivo: 'erro_rede' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Manda mídia (imagem, áudio, vídeo ou documento) de verdade pro WhatsApp
 // do cliente. Aceita tanto link quanto Base64 (a Z-API aceita os dois —
 // usamos Base64 aqui porque o arquivo vem direto do navegador do vendedor,
@@ -206,7 +255,7 @@ async function enviarMidiaWhatsapp(telefone, midiaTipo, dataUri, nomeArquivo, le
 
   const headers = { 'Content-Type': 'application/json' };
   if (cred.clientToken) headers['Client-Token'] = cred.clientToken;
-  const base = `https://api.z-api.io/instances/${cred.instanceId}/token/${cred.token}`;
+  const base = `${ZAPI_BASE}/instances/${cred.instanceId}/token/${cred.token}`;
 
   let url;
   let body;
@@ -251,7 +300,7 @@ async function enviarFigurinhaWhatsapp(telefone, imagem, setor = null) {
     console.log(`>> [Z-API não configurada] figurinha NÃO enviada de verdade pra ${telefone}`);
     return { enviado: false, motivo: 'zapi_nao_configurada' };
   }
-  const url = `https://api.z-api.io/instances/${cred.instanceId}/token/${cred.token}/send-sticker`;
+  const url = `${ZAPI_BASE}/instances/${cred.instanceId}/token/${cred.token}/send-sticker`;
   const headers = { 'Content-Type': 'application/json' };
   if (cred.clientToken) headers['Client-Token'] = cred.clientToken;
   const body = { phone: telefone, sticker: imagem };
@@ -296,4 +345,4 @@ function mapearStatusEntrega(statusCru) {
   return null;
 }
 
-module.exports = { interpretarWebhook, enviarMensagemWhatsapp, enviarMidiaWhatsapp, enviarFigurinhaWhatsapp, jaProcessada, marcarProcessada, foiEnviadaPorNos, configurado, interpretarStatus, mapearStatusEntrega, instanciaPropria, instanceIdConfigurada: CRED.instanceId };
+module.exports = { interpretarWebhook, enviarMensagemWhatsapp, editarMensagemWhatsapp, enviarMidiaWhatsapp, enviarFigurinhaWhatsapp, jaProcessada, marcarProcessada, foiEnviadaPorNos, configurado, interpretarStatus, mapearStatusEntrega, instanciaPropria, instanceIdConfigurada: CRED.instanceId };

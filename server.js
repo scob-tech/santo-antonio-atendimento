@@ -78,6 +78,12 @@ const midia = require('./midia');
 // separada deste mesmo código, com seu próprio banco e seu próprio WhatsApp.
 const SETOR = (process.env.SETOR || 'vendas').toLowerCase();
 
+// PRAZO PARA EDITAR MENSAGEM no WhatsApp, em minutos. ÚNICO lugar do sistema
+// onde esse valor existe: a tela recebe ele pelo /api/me. Regra pública do
+// WhatsApp: 15 min — mais conservador que os 7 dias citados nos erros da
+// Z-API, pra não arriscar edição aceita aqui e recusada lá depois.
+const JANELA_EDICAO_MIN = 15;
+
 const app = express();
 // Compressão gzip das respostas de texto (JSON, HTML, JS, CSS) — era a maior
 // parte do Network Egress do Railway: o painel consulta a API o tempo todo e
@@ -197,7 +203,7 @@ app.get('/api/me', requireAuth, (req, res) => {
   const vendedor = db.prepare('SELECT id, nome, login, role FROM vendedores WHERE id = ?').get(req.usuario.id);
   if (!vendedor) return res.status(401).json({ erro: 'conta não existe mais' });
 
-  res.json({ ...vendedor, setoresPermitidos: [SETOR] });
+  res.json({ ...vendedor, setoresPermitidos: [SETOR], janela_edicao_min: JANELA_EDICAO_MIN });
 });
 
 // Autoatendimento: qualquer vendedor troca a própria senha, desde que
@@ -649,6 +655,21 @@ async function processarWebhookMensagem(req, res) {
     // conectado. No caso (b), registramos a mensagem na conversa também —
     // senão ela fica invisível no sistema mesmo tendo sido enviada de verdade.
     if (fromMe) {
+      // EDIÇÃO de uma mensagem nossa (feita por este sistema ou direto no
+      // celular): a Z-API avisa com isEdit. Nunca é mensagem nova — sem isso
+      // o eco da edição entrava na conversa como uma mensagem duplicada.
+      // Se achar a mensagem original pelo id do WhatsApp, deixa o texto
+      // igual ao que está no WhatsApp; se não achar, só ignora.
+      if (req.body && req.body.isEdit === true) {
+        const original = messageId
+          ? db.prepare(`SELECT id, texto, midia_url FROM mensagens WHERE zapi_message_id = ? AND remetente = 'vendedor' AND apagada = 0`).get(messageId)
+          : null;
+        if (original && texto && !original.midia_url && original.texto !== texto) {
+          db.prepare(`UPDATE mensagens SET texto = ?, editada = 1 WHERE id = ?`).run(texto, original.id);
+          return res.status(200).json({ info: 'edição de mensagem nossa aplicada' });
+        }
+        return res.status(200).json({ info: 'eco de edição ignorado (não é mensagem nova)' });
+      }
       if (zapi.foiEnviadaPorNos(messageId)) {
         return res.status(200).json({ info: 'eco da nossa própria mensagem, ignorado' });
       }
@@ -990,9 +1011,20 @@ app.post('/api/leads/:id/marcar-nao-lida', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
+// EDITAR MENSAGEM — edita DE VERDADE no WhatsApp do cliente (Z-API send-text
+// com editMessageId) e só depois, com a Z-API confirmando, grava no banco.
+// Antes só o banco era alterado: no sistema aparecia editada, mas o cliente
+// continuava vendo a mensagem original. Se o WhatsApp não aceitar, o texto
+// original fica intacto aqui também — sistema e WhatsApp nunca divergem.
+// Regras (o WhatsApp só edita texto, e só por um tempo curto):
+//   - só mensagem de TEXTO enviada pela equipe por este sistema (tem o id do
+//     WhatsApp em zapi_message_id); anexo/legenda não é editável;
+//   - até JANELA_EDICAO_MIN minutos depois do envio (definido lá no topo).
+const edicoesEmAndamento = new Set(); // trava contra clique duplo / pedido repetido
+
 app.patch('/api/leads/:id/mensagens/:msgId', requireAuth, async (req, res) => {
   const { texto } = req.body;
-  if (!texto || !texto.trim()) return res.status(400).json({ erro: 'texto não pode ficar vazio' });
+  if (!texto || !String(texto).trim()) return res.status(400).json({ erro: 'texto não pode ficar vazio' });
 
   const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
   if (!lead) return res.status(404).json({ erro: 'lead não encontrado' });
@@ -1004,9 +1036,43 @@ app.patch('/api/leads/:id/mensagens/:msgId', requireAuth, async (req, res) => {
   if (!msg) return res.status(404).json({ erro: 'mensagem não encontrada' });
   if (msg.remetente !== 'vendedor') return res.status(400).json({ erro: 'só dá pra editar mensagem enviada pela equipe' });
   if (msg.apagada) return res.status(400).json({ erro: 'mensagem já foi apagada' });
+  if (msg.midia_url) return res.status(400).json({ erro: 'Mensagem com anexo não pode ser editada — o WhatsApp só permite editar mensagens de texto.' });
+  if (!msg.zapi_message_id) {
+    return res.status(400).json({ erro: 'Essa mensagem não tem o identificador do WhatsApp (mensagem antiga, enviada pelo celular ou que não chegou a sair), então não dá pra editá-la no WhatsApp do cliente.' });
+  }
+  const enviadaEm = Date.parse(String(msg.criado_em).replace(' ', 'T') + 'Z');
+  if (!Number.isFinite(enviadaEm) || Date.now() - enviadaEm > JANELA_EDICAO_MIN * 60 * 1000) {
+    return res.status(400).json({ erro: `O WhatsApp só permite editar uma mensagem até ${JANELA_EDICAO_MIN} minutos depois do envio. Essa já passou do prazo — se precisar corrigir, mande uma nova mensagem.` });
+  }
+  if (!zapi.configurado) return res.status(503).json({ erro: 'WhatsApp não configurado neste servidor — a mensagem não foi editada.' });
 
-  db.prepare(`UPDATE mensagens SET texto = ?, editada = 1 WHERE id = ?`).run(texto.trim(), msg.id);
-  res.json({ ok: true });
+  // Financeiro/Expedição: a mensagem saiu com a assinatura "*Nome Setor:*"
+  // na frente (e o modal de edição mostra sem ela). Mantém a MESMA assinatura
+  // da mensagem original no WhatsApp e no banco.
+  const assinatura = (msg.texto.match(/^\*[^*\n]+:\*\n/) || [''])[0];
+  const novoTexto = assinatura + String(texto).trim();
+  if (novoTexto === msg.texto) return res.json({ ok: true, inalterada: true });
+
+  if (edicoesEmAndamento.has(msg.id)) {
+    return res.status(409).json({ erro: 'Essa mensagem já está sendo editada — aguarde a confirmação do WhatsApp.' });
+  }
+  edicoesEmAndamento.add(msg.id);
+  try {
+    const r = await zapi.editarMensagemWhatsapp(lead.telefone, msg.zapi_message_id, novoTexto);
+    if (!r.editado) {
+      const motivos = {
+        timeout: 'O WhatsApp não respondeu a tempo. A mensagem continua com o texto original aqui no sistema; como a edição pode ter chegado ao cliente mesmo assim, tente de novo (repetir a mesma edição é seguro).',
+        erro_rede: 'Não foi possível falar com o WhatsApp agora (erro de rede). A mensagem não foi editada — tente de novo.',
+        erro_zapi: 'O WhatsApp recusou a edição. A mensagem continua com o texto original.',
+        zapi_nao_configurada: 'WhatsApp não configurado neste servidor — a mensagem não foi editada.',
+      };
+      return res.status(r.motivo === 'timeout' ? 504 : 502).json({ erro: motivos[r.motivo] || 'Não foi possível editar a mensagem no WhatsApp. Ela continua com o texto original.' });
+    }
+    db.prepare(`UPDATE mensagens SET texto = ?, editada = 1 WHERE id = ?`).run(novoTexto, msg.id);
+    res.json({ ok: true });
+  } finally {
+    edicoesEmAndamento.delete(msg.id);
+  }
 });
 
 app.delete('/api/leads/:id/mensagens/:msgId', requireAuth, async (req, res) => {
