@@ -162,6 +162,15 @@ db.exec(`
     criado_por INTEGER,
     criado_em TEXT NOT NULL
   );
+
+  -- Registro de "a análise diária automática já rodou nesse dia" (data no
+  -- horário de Brasília). Fica no banco, e não só em memória, pra um
+  -- redeploy depois das 21h não fazer a rotina rodar de novo e duplicar
+  -- tarefa na agenda.
+  CREATE TABLE IF NOT EXISTS execucoes_analise_diaria (
+    data TEXT PRIMARY KEY,
+    executado_em TEXT NOT NULL
+  );
 `);
 
 // ---------------------------------------------------------------

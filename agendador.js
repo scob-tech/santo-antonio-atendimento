@@ -14,20 +14,20 @@
 // quais tarefas foram criadas — pra alimentar a tela de resultado da
 // análise manual e a seção da IA no relatório do dia.
 //
-// Limitação: o "já rodou hoje" fica em memória — se o servidor reiniciar
-// (redeploy) depois das 21h no mesmo dia, pode rodar de novo e duplicar
-// alguma tarefa. Baixo impacto (o vendedor só vê a tarefa 2x), mas fica
-// registrado.
+// O "já rodou hoje" fica gravado no banco (execucoes_analise_diaria), então
+// um redeploy depois das 21h não faz a rotina rodar de novo no mesmo dia.
 
 const db = require('./db');
 const claudeIA = require('./claude');
-
-let ultimaExecucaoData = null;
 
 // Monta as conversas com atividade HOJE de um setor, já com o nome do
 // atendente responsável em cada lead (lead.vendedor_nome), respeitando um
 // orçamento de caracteres pra não estourar token num setor com muito volume.
 // Usado pela curadoria de qualidade diária (relatório por vendedor).
+//
+// "Hoje" é o dia em Brasília: mensagens.criado_em é gravado em UTC, e a
+// rotina roda às 21h BRT, que já é 00h UTC do dia seguinte — comparar com
+// date('now') (UTC) pegava o dia errado e a lista vinha sempre vazia.
 function montarConversasDoDia(setorId) {
   const LIMITE_CONVERSAS = 60;
   const LIMITE_MENSAGENS = 40;
@@ -38,11 +38,11 @@ function montarConversasDoDia(setorId) {
     SELECT leads.*, MAX(mensagens.criado_em) AS ultima_msg
     FROM leads
     JOIN mensagens ON mensagens.lead_id = leads.id
-    WHERE leads.setor_id = ? AND date(mensagens.criado_em) = date('now')
+    WHERE leads.setor_id = ? AND date(mensagens.criado_em, '-3 hours') = ?
     GROUP BY leads.id
     ORDER BY ultima_msg DESC
     LIMIT ?
-  `).all(setorId, LIMITE_CONVERSAS);
+  `).all(setorId, agoraBRT().dataISO, LIMITE_CONVERSAS);
   if (leads.length === 0) return [];
 
   const vendMap = {};
@@ -240,8 +240,14 @@ async function rodarAnaliseDiaria() {
           relatorioFinanceiroGerado = true;
         }
         curadoriaQualidadeGerada = true;
+      } else {
+        console.error(`>> Curadoria de qualidade (${SETOR_ATIVO}) não gerada: ${(q && q.erro) || 'resposta vazia da IA'}`);
       }
+    } else {
+      console.log(`>> Curadoria de qualidade (${SETOR_ATIVO}) pulada: nenhuma conversa com mensagem hoje (${hojeISO}).`);
     }
+  } else {
+    console.error(`>> Curadoria de qualidade pulada: setor "${SETOR_ATIVO}" não encontrado no banco.`);
   }
 
   // 2) Leads 'novo' que ninguém puxou o dia inteiro — vira alerta pro admin
@@ -285,14 +291,28 @@ async function rodarAnaliseDiaria() {
   };
 }
 
+// Marca o dia como executado no banco. Devolve false se já estava marcado
+// (outra rodada do mesmo dia já começou, mesmo antes de um redeploy).
+function marcarExecucaoDoDia(dataISO) {
+  const info = db.prepare(`
+    INSERT OR IGNORE INTO execucoes_analise_diaria (data, executado_em)
+    VALUES (?, strftime('%Y-%m-%d %H:%M:%f','now'))
+  `).run(dataISO);
+  return info.changes > 0;
+}
+
 // Verifica a cada 5 minutos se já são 21h (BRT) e ainda não rodou hoje.
 function iniciarAgendador() {
   setInterval(async () => {
     const { hora, dataISO } = agoraBRT();
-    if (hora === 21 && ultimaExecucaoData !== dataISO) {
-      ultimaExecucaoData = dataISO;
+    if (hora !== 21) return;
+    try {
+      if (!marcarExecucaoDoDia(dataISO)) return;
       console.log('>> Rodando análise diária automática (21h)...');
       await rodarAnaliseDiaria();
+    } catch (err) {
+      // Sem isso, uma exceção aqui vira rejeição não tratada e derruba o processo.
+      console.error('>> Erro na análise diária automática:', err && err.stack ? err.stack : err);
     }
   }, 5 * 60 * 1000);
   console.log('>> Agendador da análise diária ativo (roda sozinho às 21h, horário de Brasília).');

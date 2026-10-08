@@ -1581,7 +1581,7 @@ app.post('/api/lembretes', requireAuth, (req, res) => {
   res.status(201).json({ ok: true, id: info.lastInsertRowid });
 });
 
-// Disparo manual da análise diária (útil pra testar sem esperar 18h, ou se
+// Disparo manual da análise diária (útil pra testar sem esperar 21h, ou se
 // o servidor esteve fora do ar na hora automática) — só admin.
 app.post('/api/admin/rodar-analise-diaria', requireAuth, requireAdmin, async (req, res) => {
   const resultado = await agendador.rodarAnaliseDiaria();
