@@ -84,6 +84,12 @@ const SETOR = (process.env.SETOR || 'vendas').toLowerCase();
 // Z-API, pra não arriscar edição aceita aqui e recusada lá depois.
 const JANELA_EDICAO_MIN = 15;
 
+// PRAZO PARA APAGAR PARA TODOS no WhatsApp, em horas. ÚNICO lugar do sistema
+// onde esse valor existe: a tela recebe ele pelo /api/me. O WhatsApp permite
+// ~2 dias e meio; 48h é mais conservador, pra não arriscar a Z-API aceitar e
+// o WhatsApp do cliente continuar mostrando a mensagem.
+const JANELA_APAGAR_HORAS = 48;
+
 const app = express();
 // Compressão gzip das respostas de texto (JSON, HTML, JS, CSS) — era a maior
 // parte do Network Egress do Railway: o painel consulta a API o tempo todo e
@@ -203,7 +209,7 @@ app.get('/api/me', requireAuth, (req, res) => {
   const vendedor = db.prepare('SELECT id, nome, login, role FROM vendedores WHERE id = ?').get(req.usuario.id);
   if (!vendedor) return res.status(401).json({ erro: 'conta não existe mais' });
 
-  res.json({ ...vendedor, setoresPermitidos: [SETOR], janela_edicao_min: JANELA_EDICAO_MIN });
+  res.json({ ...vendedor, setoresPermitidos: [SETOR], janela_edicao_min: JANELA_EDICAO_MIN, janela_apagar_horas: JANELA_APAGAR_HORAS });
 });
 
 // Autoatendimento: qualquer vendedor troca a própria senha, desde que
@@ -1075,6 +1081,12 @@ app.patch('/api/leads/:id/mensagens/:msgId', requireAuth, async (req, res) => {
   }
 });
 
+// APAGAR MENSAGEM — apaga PARA TODOS no WhatsApp do cliente (Z-API) antes de
+// marcar como apagada aqui. Regras: só mensagem enviada pela equipe por este
+// sistema (tem zapi_message_id) e até JANELA_APAGAR_HORAS depois do envio.
+// Fora disso, só com ?somente_sistema=1 (a tela pergunta antes).
+const exclusoesEmAndamento = new Set(); // trava contra clique duplo / pedido repetido
+
 app.delete('/api/leads/:id/mensagens/:msgId', requireAuth, async (req, res) => {
   const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
   if (!lead) return res.status(404).json({ erro: 'lead não encontrado' });
@@ -1088,8 +1100,50 @@ app.delete('/api/leads/:id/mensagens/:msgId', requireAuth, async (req, res) => {
 
   // Soft delete: o texto/mídia somem da tela, mas a linha continua
   // existindo (senão uma citação apontando pra essa mensagem quebraria).
-  db.prepare(`UPDATE mensagens SET apagada = 1, texto = 'Mensagem apagada', midia_url = NULL, midia_tipo = NULL, midia_nome = NULL WHERE id = ?`).run(msg.id);
-  res.json({ ok: true });
+  const apagarNoBanco = () => db.prepare(`UPDATE mensagens SET apagada = 1, texto = 'Mensagem apagada', midia_url = NULL, midia_tipo = NULL, midia_nome = NULL WHERE id = ?`).run(msg.id);
+
+  // ?somente_sistema=1: a pessoa confirmou que quer apagar SÓ aqui (mensagem
+  // sem id do WhatsApp — antiga ou mandada pelo celular — ou fora do prazo
+  // do WhatsApp). É o comportamento de antes, sem tocar no WhatsApp.
+  if (req.query.somente_sistema === '1') {
+    if (!msg.apagada) apagarNoBanco();
+    return res.json({ ok: true, apagada_no_whatsapp: false });
+  }
+  if (msg.apagada) return res.json({ ok: true, inalterada: true });
+
+  // Apagar PARA TODOS no WhatsApp do cliente e só depois, com a Z-API
+  // confirmando, gravar no banco. Antes só o banco era alterado: no sistema
+  // sumia, mas o cliente continuava vendo — a equipe tinha que apagar de novo
+  // pelo WhatsApp Web. Se o WhatsApp não aceitar, a mensagem fica intacta aqui.
+  if (!msg.zapi_message_id) {
+    return res.status(400).json({ codigo: 'sem_id_whatsapp', erro: 'Essa mensagem não tem o identificador do WhatsApp (mensagem antiga, enviada pelo celular ou que não chegou a sair), então não dá pra apagá-la no WhatsApp do cliente.' });
+  }
+  const enviadaEm = Date.parse(String(msg.criado_em).replace(' ', 'T') + 'Z');
+  if (!Number.isFinite(enviadaEm) || Date.now() - enviadaEm > JANELA_APAGAR_HORAS * 60 * 60 * 1000) {
+    return res.status(400).json({ codigo: 'fora_do_prazo', erro: `O WhatsApp só permite apagar para todos até ${JANELA_APAGAR_HORAS} horas depois do envio. Essa já passou do prazo.` });
+  }
+  if (!zapi.configurado) return res.status(503).json({ erro: 'WhatsApp não configurado neste servidor — a mensagem não foi apagada.' });
+
+  if (exclusoesEmAndamento.has(msg.id)) {
+    return res.status(409).json({ erro: 'Essa mensagem já está sendo apagada — aguarde a confirmação do WhatsApp.' });
+  }
+  exclusoesEmAndamento.add(msg.id);
+  try {
+    const r = await zapi.apagarMensagemWhatsapp(lead.telefone, msg.zapi_message_id);
+    if (!r.apagado) {
+      const motivos = {
+        timeout: 'O WhatsApp não respondeu a tempo. A mensagem continua aqui no sistema; como ela pode ter sido apagada no cliente mesmo assim, tente de novo (repetir é seguro).',
+        erro_rede: 'Não foi possível falar com o WhatsApp agora (erro de rede). A mensagem não foi apagada — tente de novo.',
+        erro_zapi: 'O WhatsApp recusou apagar a mensagem. Ela continua aqui e no WhatsApp do cliente.',
+        zapi_nao_configurada: 'WhatsApp não configurado neste servidor — a mensagem não foi apagada.',
+      };
+      return res.status(r.motivo === 'timeout' ? 504 : 502).json({ erro: motivos[r.motivo] || 'Não foi possível apagar a mensagem no WhatsApp. Ela continua aqui e lá.' });
+    }
+    apagarNoBanco();
+    res.json({ ok: true, apagada_no_whatsapp: true });
+  } finally {
+    exclusoesEmAndamento.delete(msg.id);
+  }
 });
 
 // Vendedor logado "puxa" o lead pra si (não seleciona mais quem — é sempre quem está logado)

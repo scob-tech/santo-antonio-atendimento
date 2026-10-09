@@ -242,6 +242,50 @@ async function editarMensagemWhatsapp(telefone, messageIdOriginal, novoTexto) {
   }
 }
 
+// APAGA PARA TODOS uma mensagem que nós enviamos, no WhatsApp do cliente —
+// DELETE /messages?messageId=&phone=&owner=true (documentado em
+// https://developer.z-api.io/message/delete-message.md; sem deleteForMe =
+// apaga para todos). Igual à edição: devolve { apagado: true } só com
+// resposta 2xx da Z-API, pra o chamador só mexer no banco depois disso.
+// 'timeout' = resultado incerto (pode ter sido apagada mesmo assim).
+const TEMPO_LIMITE_APAGAR_MS = 15000;
+async function apagarMensagemWhatsapp(telefone, messageIdOriginal) {
+  if (!configurado) return { apagado: false, motivo: 'zapi_nao_configurada' };
+  if (!messageIdOriginal) return { apagado: false, motivo: 'sem_id_whatsapp' };
+
+  const params = new URLSearchParams({ messageId: messageIdOriginal, phone: telefone, owner: 'true' });
+  const url = `${ZAPI_BASE}/instances/${CRED.instanceId}/token/${CRED.token}/messages?${params}`;
+  const headers = { 'Content-Type': 'application/json' };
+  if (CRED.clientToken) headers['Client-Token'] = CRED.clientToken;
+
+  const controle = new AbortController();
+  const timer = setTimeout(() => controle.abort(), TEMPO_LIMITE_APAGAR_MS);
+  try {
+    const res = await fetch(url, { method: 'DELETE', headers, signal: controle.signal });
+    if (!res.ok) {
+      const detalhe = await res.text().catch(() => '');
+      console.error(`>> Z-API recusou apagar a mensagem (status ${res.status}): ${detalhe}`);
+      return { apagado: false, motivo: 'erro_zapi', status: res.status, detalhe: detalhe.slice(0, 300) };
+    }
+    const data = await res.json().catch(() => null);
+    // A Z-API responde { value: true }; value false explícito = não apagou.
+    if (data && data.value === false) {
+      console.error('>> Z-API respondeu value:false ao apagar a mensagem');
+      return { apagado: false, motivo: 'erro_zapi' };
+    }
+    return { apagado: true };
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      console.error(`>> Z-API não respondeu o pedido de apagar em ${TEMPO_LIMITE_APAGAR_MS / 1000}s`);
+      return { apagado: false, motivo: 'timeout' };
+    }
+    console.error('>> Erro de rede ao apagar mensagem na Z-API:', err.message);
+    return { apagado: false, motivo: 'erro_rede' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Manda mídia (imagem, áudio, vídeo ou documento) de verdade pro WhatsApp
 // do cliente. Aceita tanto link quanto Base64 (a Z-API aceita os dois —
 // usamos Base64 aqui porque o arquivo vem direto do navegador do vendedor,
@@ -345,4 +389,4 @@ function mapearStatusEntrega(statusCru) {
   return null;
 }
 
-module.exports = { interpretarWebhook, enviarMensagemWhatsapp, editarMensagemWhatsapp, enviarMidiaWhatsapp, enviarFigurinhaWhatsapp, jaProcessada, marcarProcessada, foiEnviadaPorNos, configurado, interpretarStatus, mapearStatusEntrega, instanciaPropria, instanceIdConfigurada: CRED.instanceId };
+module.exports = { interpretarWebhook, enviarMensagemWhatsapp, editarMensagemWhatsapp, apagarMensagemWhatsapp, enviarMidiaWhatsapp, enviarFigurinhaWhatsapp, jaProcessada, marcarProcessada, foiEnviadaPorNos, configurado, interpretarStatus, mapearStatusEntrega, instanciaPropria, instanceIdConfigurada: CRED.instanceId };

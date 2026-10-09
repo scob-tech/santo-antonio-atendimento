@@ -2373,19 +2373,73 @@ async function confirmarEditarMensagem() {
   }
 }
 
+// Apaga PARA TODOS no WhatsApp do cliente; o servidor só marca como apagada
+// depois que a Z-API confirma. Quando não dá pra apagar lá (mensagem sem id
+// do WhatsApp ou fora do prazo), pergunta se é pra apagar só aqui no sistema.
+let apagandoMensagem = false;
 async function apagarMensagem(msgId) {
-  if (!leadConversaAtual) return;
-  if (!confirm('Apagar essa mensagem? Isso só apaga aqui no sistema — se já foi entregue no WhatsApp do cliente, continua lá.')) return;
-  const res = await fetch(`${API}/api/leads/${leadConversaAtual.id}/mensagens/${msgId}`, { method: 'DELETE' });
-  if (!res.ok) {
-    const err = await res.json();
-    alert(err.erro || 'Erro ao apagar');
+  if (!leadConversaAtual || apagandoMensagem) return;
+  const msg = leadConversaAtual.mensagens.find((m) => m.id === msgId);
+  if (!msg) return;
+  // Prazo vem do servidor (/api/me); esta conta só escolhe a pergunta certa —
+  // quem decide de verdade é o servidor.
+  const prazoH = usuarioAtual && usuarioAtual.janela_apagar_horas;
+  const enviadaEm = new Date(msg.criado_em + 'Z').getTime();
+  const foraDoPrazo = Boolean(prazoH) && Date.now() - enviadaEm > prazoH * 60 * 60 * 1000;
+  const motivoSoSistema = !msg.zapi_message_id
+    ? 'Essa mensagem não tem o identificador do WhatsApp (antiga, enviada pelo celular ou que não chegou a sair), então não dá pra apagá-la no WhatsApp do cliente.'
+    : foraDoPrazo ? `O WhatsApp só permite apagar para todos até ${prazoH} horas depois do envio, e essa já passou do prazo.` : null;
+
+  let somenteSistema = false;
+  if (motivoSoSistema) {
+    if (!confirm(`${motivoSoSistema}\n\nApagar só aqui no sistema? No WhatsApp do cliente ela continua.`)) return;
+    somenteSistema = true;
+  } else if (!confirm('Apagar essa mensagem para todos? Ela também será apagada no WhatsApp do cliente.')) {
     return;
   }
-  const atualizado = await (await fetch(`${API}/api/leads/${leadConversaAtual.id}`)).json();
-  leadConversaAtual = atualizado;
-  marcarVistoConversaAberta();
-  renderizarConversa(atualizado);
+
+  const leadId = leadConversaAtual.id;
+  apagandoMensagem = true;
+  const controle = new AbortController();
+  const timer = setTimeout(() => controle.abort(), 25000); // servidor desiste da Z-API em 15s
+  try {
+    let res;
+    try {
+      res = await fetch(`${API}/api/leads/${leadId}/mensagens/${msgId}${somenteSistema ? '?somente_sistema=1' : ''}`, { method: 'DELETE', signal: controle.signal });
+    } catch (e) {
+      alert('Sem resposta do servidor — não dá pra confirmar se a mensagem foi apagada no WhatsApp. Confira a conversa e, se precisar, tente de novo.');
+      return;
+    }
+    if (!res.ok) {
+      let corpo = null;
+      try { corpo = await res.clone().json(); } catch (e) { /* resposta não era JSON */ }
+      // A tela achava que dava pra apagar no WhatsApp, mas o servidor disse
+      // que não (ex: prazo contado diferente): oferece apagar só aqui.
+      if (!somenteSistema && corpo && (corpo.codigo === 'sem_id_whatsapp' || corpo.codigo === 'fora_do_prazo')) {
+        apagandoMensagem = false;
+        if (confirm(`${corpo.erro}\n\nApagar só aqui no sistema? No WhatsApp do cliente ela continua.`)) {
+          const res2 = await fetch(`${API}/api/leads/${leadId}/mensagens/${msgId}?somente_sistema=1`, { method: 'DELETE' }).catch(() => null);
+          if (!res2 || !res2.ok) { alert(res2 ? await lerErroDaResposta(res2, 'Não foi possível apagar a mensagem') : 'Sem conexão com o servidor — a mensagem não foi apagada.'); return; }
+          somenteSistema = true;
+        } else {
+          return;
+        }
+      } else {
+        alert(await lerErroDaResposta(res, 'Não foi possível apagar a mensagem'));
+        return;
+      }
+    }
+    mostrarAvisoRapido(somenteSistema ? 'Mensagem apagada só aqui no sistema' : 'Mensagem apagada no WhatsApp');
+    if (!leadConversaAtual || leadConversaAtual.id !== leadId) return; // trocou de conversa no meio
+    const atualizado = await (await fetch(`${API}/api/leads/${leadId}`)).json();
+    if (!leadConversaAtual || leadConversaAtual.id !== leadId) return;
+    leadConversaAtual = atualizado;
+    marcarVistoConversaAberta();
+    renderizarConversa(atualizado, { manterRolagem: true });
+  } finally {
+    clearTimeout(timer);
+    apagandoMensagem = false;
+  }
 }
 
 async function marcarComoNaoLida() {
