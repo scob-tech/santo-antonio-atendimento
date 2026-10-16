@@ -1161,15 +1161,15 @@ app.post('/api/leads/:id/claim', requireAuth, (req, res) => {
     return res.status(409).json({ erro: 'lead já foi puxado por outro vendedor' });
   }
 
-  // Limite de 5 conversas simultâneas por vendedor em Vendas — evita
+  // Limite de 2 conversas simultâneas por vendedor em Vendas — evita
   // acumular lead sem fechar; admin/supervisor não têm esse limite.
   const setorDoLeadClaim = db.prepare('SELECT slug FROM setores WHERE id = ?').get(lead.setor_id);
   if (setorDoLeadClaim && setorDoLeadClaim.slug === 'vendas' && !ehGestor(req.usuario)) {
     const ativos = db.prepare(
       `SELECT COUNT(*) AS n FROM leads WHERE vendedor_id = ? AND status = 'em_atendimento' AND setor_id = ?`
     ).get(req.usuario.id, lead.setor_id).n;
-    if (ativos >= 5) {
-      return res.status(409).json({ erro: 'Você já está com 5 conversas simultâneas em Vendas. Feche alguma antes de pegar outro lead.' });
+    if (ativos >= 2) {
+      return res.status(409).json({ erro: 'Você já está com 2 conversas simultâneas em Vendas. Feche alguma antes de pegar outro lead.' });
     }
   }
 
@@ -1247,8 +1247,8 @@ app.post('/api/leads/manual', requireAuth, (req, res) => {
     const ativos = db.prepare(
       `SELECT COUNT(*) AS n FROM leads WHERE vendedor_id = ? AND status = 'em_atendimento' AND setor_id = ?`
     ).get(req.usuario.id, setorAtivo.id).n;
-    if (ativos >= 5) {
-      return res.status(409).json({ erro: 'Você já está com 5 conversas simultâneas em Vendas. Feche alguma antes de cadastrar outro lead.' });
+    if (ativos >= 2) {
+      return res.status(409).json({ erro: 'Você já está com 2 conversas simultâneas em Vendas. Feche alguma antes de cadastrar outro lead.' });
     }
   }
 

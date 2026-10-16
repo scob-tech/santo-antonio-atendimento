@@ -1293,14 +1293,14 @@ async function carregarLeads() {
     return;
   }
 
-  // Limite de 5 conversas simultâneas por vendedor, só em Vendas — depois
+  // Limite de 2 conversas simultâneas por vendedor, só em Vendas — depois
   // de bater o limite, os leads novos ficam cinza (ainda visíveis, mas
   // sem poder abrir) até o vendedor fechar alguma conversa.
   const noLimite = setorAtivo === 'vendas' && !ehGestor(usuarioAtual)
-    && conversasAtivasCache.filter((l) => l.vendedor_id === usuarioAtual.id).length >= 5;
+    && conversasAtivasCache.filter((l) => l.vendedor_id === usuarioAtual.id).length >= 2;
 
   const avisoLimite = noLimite
-    ? `<li class="inbox-alert">${icone('triangle-alert', 16)}<span>Você está com 5 conversas ativas — feche alguma antes de pegar um novo lead.</span></li>`
+    ? `<li class="inbox-alert">${icone('triangle-alert', 16)}<span>Você está com 2 conversas ativas — feche alguma antes de pegar um novo lead.</span></li>`
     : '';
 
   // Ordenados por quem chegou primeiro
