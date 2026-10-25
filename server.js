@@ -1146,6 +1146,28 @@ app.delete('/api/leads/:id/mensagens/:msgId', requireAuth, async (req, res) => {
   }
 });
 
+// Limite de 2 conversas simultâneas por vendedor em Vendas, valendo pra
+// TODO caminho que coloca uma conversa nas mãos de um vendedor (reabrir,
+// escrever numa encerrada, receber transferência) — não só o "puxar".
+// Sem isso o limite era contornado reabrindo conversas antigas.
+// Admin/supervisor e conversa de grupo não têm limite.
+function vendedorNoLimiteVendas(vendedorId, lead) {
+  if (!vendedorId || lead.is_grupo) return false;
+  const setor = db.prepare('SELECT slug FROM setores WHERE id = ?').get(lead.setor_id);
+  if (!setor || setor.slug !== 'vendas') return false;
+  const vendedor = db.prepare('SELECT role FROM vendedores WHERE id = ?').get(vendedorId);
+  if (!vendedor || ehGestor(vendedor)) return false;
+  const ativos = db.prepare(
+    `SELECT COUNT(*) AS n FROM leads WHERE vendedor_id = ? AND status = 'em_atendimento' AND setor_id = ? AND id != ?`
+  ).get(vendedorId, lead.setor_id, lead.id).n;
+  return ativos >= 2;
+}
+function erroLimiteVendas(vendedorId, usuario) {
+  return vendedorId === usuario.id
+    ? 'Você já está com 2 conversas simultâneas em Vendas. Encerre alguma antes de reabrir esta.'
+    : 'Esse vendedor já está com 2 conversas simultâneas em Vendas. Ele precisa encerrar alguma antes de receber outra.';
+}
+
 // Vendedor logado "puxa" o lead pra si (não seleciona mais quem — é sempre quem está logado)
 app.post('/api/leads/:id/claim', requireAuth, (req, res) => {
   const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);
@@ -1209,6 +1231,9 @@ app.post('/api/leads/:id/transferir', requireAuth, (req, res) => {
 
   const novoVendedor = db.prepare('SELECT id FROM vendedores WHERE id = ?').get(novo_vendedor_id);
   if (!novoVendedor) return res.status(404).json({ erro: 'vendedor de destino não encontrado' });
+  if (vendedorNoLimiteVendas(novoVendedor.id, lead)) {
+    return res.status(409).json({ erro: erroLimiteVendas(novoVendedor.id, req.usuario) });
+  }
 
   db.prepare(`UPDATE leads SET vendedor_id = ?, status = 'em_atendimento' WHERE id = ?`)
     .run(novo_vendedor_id, req.params.id);
@@ -1324,6 +1349,9 @@ app.post('/api/leads/:id/reabrir', requireAuth, (req, res) => {
   if (!ehGestor(req.usuario) && !dono) {
     return res.status(403).json({ erro: 'só quem atendeu (ou o admin) pode reabrir essa conversa' });
   }
+  if (vendedorNoLimiteVendas(lead.vendedor_id || req.usuario.id, lead)) {
+    return res.status(409).json({ erro: erroLimiteVendas(lead.vendedor_id || req.usuario.id, req.usuario) });
+  }
 
   // Se o lead nunca teve dono (foi encerrado sem ninguém puxar), quem
   // reabre assume o atendimento — mesma regra do claim normal.
@@ -1349,6 +1377,11 @@ app.post('/api/leads/:id/mensagens', requireAuth, async (req, res) => {
   const dono = lead.vendedor_id === req.usuario.id || Boolean(lead.is_grupo);
   if (!ehGestor(req.usuario) && !dono) {
     return res.status(403).json({ erro: 'só quem está atendendo (ou o admin) pode responder' });
+  }
+  // Escrever numa conversa encerrada reabre ela (logo abaixo) — então
+  // respeita o mesmo limite de conversas simultâneas.
+  if (lead.status === 'encerrado' && vendedorNoLimiteVendas(lead.vendedor_id || req.usuario.id, lead)) {
+    return res.status(409).json({ erro: erroLimiteVendas(lead.vendedor_id || req.usuario.id, req.usuario) });
   }
 
   const rotulos = { imagem: '[Imagem]', audio: '[Áudio]', video: '[Vídeo]', documento: '[Documento]' };
@@ -1523,6 +1556,9 @@ app.post('/api/mensagens/:id/encaminhar', requireAuth, async (req, res) => {
   const textoParaEnviar = textoOriginal;
 
   // Escrever numa conversa encerrada reabre ela (mesma regra do envio normal).
+  if (destino.status === 'encerrado' && vendedorNoLimiteVendas(destino.vendedor_id, destino)) {
+    return res.status(409).json({ erro: erroLimiteVendas(destino.vendedor_id, req.usuario) });
+  }
   if (destino.status === 'encerrado') {
     db.prepare(`UPDATE leads SET status = 'em_atendimento' WHERE id = ?`).run(destino.id);
   }
@@ -2469,6 +2505,9 @@ app.post('/api/leads/:id/figurinha', requireAuth, async (req, res) => {
   if (!fig) return res.status(404).json({ erro: 'figurinha não encontrada' });
 
   const setorDoLead = lead.setor_id ? db.prepare('SELECT slug FROM setores WHERE id = ?').get(lead.setor_id) : null;
+  if (lead.status === 'encerrado' && vendedorNoLimiteVendas(lead.vendedor_id || req.usuario.id, lead)) {
+    return res.status(409).json({ erro: erroLimiteVendas(lead.vendedor_id || req.usuario.id, req.usuario) });
+  }
   if (lead.status === 'encerrado') {
     db.prepare(`UPDATE leads SET status = 'em_atendimento', vendedor_id = ? WHERE id = ?`).run(lead.vendedor_id || req.usuario.id, lead.id);
   }
