@@ -70,6 +70,7 @@ const push = require('./push');
 const agendador = require('./agendador');
 const backup = require('./backup');
 const midia = require('./midia');
+const horario = require('./horario');
 
 // EDIÇÃO DE SETOR ÚNICO: este sistema inteiro atende UM setor só, fixado
 // pela variável de ambiente SETOR (vendas | financeiro | expedicao). Tudo
@@ -1895,14 +1896,14 @@ app.get('/api/relatorio', requireAuth, (req, res) => {
 });
 
 // ---------------------------------------------------------------
-// PROGRESSO: gráfico de vendas (leads convertidos) por período —
-// usa o que a análise diária da IA já preenche (resultado/valor_venda/
-// convertido_em), sem precisar de tabela nova.
+// PROGRESSO: gráfico de conversas encerradas por período (status
+// 'encerrado', pela data do encerramento — encerrado_em), sem precisar
+// de tabela nova.
 // ---------------------------------------------------------------
-function agruparPorGranularidade(vendas, granularidade) {
+function agruparPorGranularidade(encerradas, granularidade) {
   const buckets = new Map();
-  for (const v of vendas) {
-    const bruto = v.convertido_em.includes('Z') ? v.convertido_em : v.convertido_em + 'Z';
+  for (const v of encerradas) {
+    const bruto = v.encerrado_em.includes('Z') ? v.encerrado_em : v.encerrado_em.replace(' ', 'T') + 'Z';
     const data = new Date(bruto);
     let key, label;
     if (granularidade === 'mensal') {
@@ -1955,14 +1956,23 @@ app.get('/api/relatorio/progresso', requireAuth, (req, res) => {
   // por padrão, mas pode escolher um vendedor específico pra isolar.
   const vendedorFiltro = gestor && req.query.vendedor_id ? Number(req.query.vendedor_id) : (!gestor ? req.usuario.id : null);
 
-  const vendas = vendedorFiltro
-    ? db.prepare(`SELECT convertido_em, valor_venda FROM leads WHERE resultado = 'convertido' AND setor_id = ? AND vendedor_id = ? AND convertido_em >= ?`)
+  // encerrado_em fica no formato do SQLite ("2026-10-29 13:14:18.123"), e as
+  // datas do período em ISO ("2026-10-29T00:00:00.000Z"). Comparando texto,
+  // " " < "T" jogaria as encerradas do primeiro dia pro período anterior —
+  // por isso as datas do período são convertidas pro mesmo formato.
+  const formatoSqlite = (iso) => iso.replace('T', ' ').replace('Z', '');
+  desdeAtual = formatoSqlite(desdeAtual);
+  desdeAnterior = formatoSqlite(desdeAnterior);
+  ateAtual = formatoSqlite(ateAtual);
+
+  const encerradas = vendedorFiltro
+    ? db.prepare(`SELECT encerrado_em FROM leads WHERE status = 'encerrado' AND setor_id = ? AND vendedor_id = ? AND encerrado_em >= ?`)
         .all(setorAtivo.id, vendedorFiltro, desdeAnterior)
-    : db.prepare(`SELECT convertido_em, valor_venda FROM leads WHERE resultado = 'convertido' AND setor_id = ? AND convertido_em >= ?`)
+    : db.prepare(`SELECT encerrado_em FROM leads WHERE status = 'encerrado' AND setor_id = ? AND encerrado_em >= ?`)
         .all(setorAtivo.id, desdeAnterior);
 
-  const atual = vendas.filter((v) => v.convertido_em >= desdeAtual && v.convertido_em <= ateAtual);
-  const anterior = vendas.filter((v) => v.convertido_em < desdeAtual);
+  const atual = encerradas.filter((v) => v.encerrado_em >= desdeAtual && v.encerrado_em <= ateAtual);
+  const anterior = encerradas.filter((v) => v.encerrado_em < desdeAtual);
 
   const total = atual.length;
   const totalAnterior = anterior.length;
@@ -1976,6 +1986,53 @@ app.get('/api/relatorio/progresso', requireAuth, (req, res) => {
     comparacao,
     buckets: agruparPorGranularidade(atual, granularidade),
   });
+});
+
+// ---------------------------------------------------------------
+// TEMPO MÉDIO DE RESPOSTA (card do Histórico): quanto o vendedor leva pra
+// responder depois que o cliente escreve. Em cada conversa, uma sequência
+// de mensagens do cliente conta a partir da PRIMEIRA delas até a próxima
+// mensagem do vendedor (mensagem da IA não conta como resposta). Entram as
+// respostas dadas nas últimas 48h, contando só o tempo dentro do
+// expediente (horario.js). Grupos ficam de fora.
+// ---------------------------------------------------------------
+app.get('/api/indicadores/tempo-resposta', requireAuth, (req, res) => {
+  const setorAtivo = resolverSetorAtivo(req.usuario, req.query.setor);
+  if (setorAtivo.erro) return res.status(403).json(setorAtivo);
+
+  // A pergunta do cliente pode ser de alguns dias antes da resposta, por
+  // isso olha 7 dias pra trás. O id das mensagens cresce com o tempo: achar
+  // a última mensagem antes do corte (varrendo do fim) evita ler a tabela
+  // inteira, que não tem índice por data.
+  const corte = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').replace('Z', '');
+  const ultimaAntesDoCorte = db.prepare('SELECT id FROM mensagens WHERE criado_em < ? ORDER BY id DESC LIMIT 1').get(corte);
+  const msgs = db.prepare(`
+    SELECT m.lead_id, m.remetente, m.criado_em FROM mensagens m
+    JOIN leads l ON l.id = m.lead_id
+    WHERE m.id > ? AND l.setor_id = ? AND l.is_grupo = 0 AND m.remetente IN ('cliente', 'vendedor')
+    ORDER BY m.lead_id, m.id
+  `).all(ultimaAntesDoCorte ? ultimaAntesDoCorte.id : 0, setorAtivo.id);
+
+  const limite = Date.now() - 48 * 60 * 60 * 1000;
+  const tempos = [];
+  let leadAtual = null;
+  let aguardandoDesde = null;
+  for (const m of msgs) {
+    if (m.lead_id !== leadAtual) {
+      leadAtual = m.lead_id;
+      aguardandoDesde = null;
+    }
+    const quando = new Date(m.criado_em.replace(' ', 'T') + 'Z');
+    if (m.remetente === 'cliente') {
+      if (!aguardandoDesde) aguardandoDesde = quando;
+    } else if (aguardandoDesde) {
+      if (quando.getTime() >= limite) tempos.push(horario.minutosUteis(aguardandoDesde, quando));
+      aguardandoDesde = null;
+    }
+  }
+
+  const media = tempos.length ? tempos.reduce((a, b) => a + b, 0) / tempos.length : null;
+  res.json({ media_min: media === null ? null : Math.round(media * 10) / 10, respostas: tempos.length });
 });
 
 // ---------------------------------------------------------------

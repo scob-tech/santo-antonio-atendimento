@@ -451,8 +451,8 @@
               <button class="kpi" type="button" style="--kpi-cor: var(--ok);" onclick="mudarPeriodoHistorico('hoje')" title="Conversas encerradas hoje">
                 <span class="kpi-body"><span class="kpi-value" id="historico-kpi-hoje">0</span><span class="kpi-label">Encerradas hoje</span></span>
               </button>
-              <button class="kpi" type="button" style="--kpi-cor: var(--brand);" onclick="mudarPeriodoHistorico('48h')" title="Da chegada do cliente ao encerramento, nas conversas encerradas nas últimas 48h">
-                <span class="kpi-body"><span class="kpi-value" id="historico-kpi-tempo">—</span><span class="kpi-label">Tempo médio de atendimento</span></span>
+              <button class="kpi" type="button" style="--kpi-cor: var(--brand);" onclick="mudarPeriodoHistorico('48h')" title="Quanto o vendedor leva para responder depois que o cliente escreve (respostas das últimas 48h, contando só o horário de funcionamento da loja)">
+                <span class="kpi-body"><span class="kpi-value" id="historico-kpi-tempo">—</span><span class="kpi-label">Tempo médio de resposta</span></span>
               </button>
             </div>
           </div>
@@ -496,7 +496,7 @@
           <section class="agenda-header">
             <div>
               <h1>Progresso</h1>
-              <p>Desempenho de vendas — pedidos ao longo do tempo.</p>
+              <p>Desempenho do atendimento — conversas encerradas ao longo do tempo.</p>
             </div>
           </section>
 
@@ -545,7 +545,7 @@
           </section>
 
           <div class="card list-card" style="margin-top:20px;">
-            <div class="list-header"><span class="list-title" id="progresso-grafico-titulo">VENDAS</span></div>
+            <div class="list-header"><span class="list-title" id="progresso-grafico-titulo">CONVERSAS ENCERRADAS</span></div>
             <div class="progresso-grafico" id="progresso-grafico"></div>
           </div>
         </div>

@@ -59,4 +59,26 @@ function statusAgora() {
   return { aberto: false, proxima_abertura_texto: 'em breve' };
 }
 
-module.exports = { statusAgora };
+// Minutos de EXPEDIENTE entre duas datas — só conta o tempo em que a loja
+// está aberta (HORARIOS acima). Ex: cliente escreve às 22h e é respondido
+// às 07:10 do dia seguinte → 10 min, não 9 h. Usado no tempo médio de
+// resposta, pra noite e domingo não inflarem a média.
+function minutosUteis(inicio, fim) {
+  if (!(fim > inicio)) return 0;
+  const OFFSET = 3 * 60 * 60 * 1000; // mesmo UTC-3 fixo do agoraBRT()
+  const ini = inicio.getTime() - OFFSET;
+  const fi = fim.getTime() - OFFSET;
+  const primeiroDia = new Date(ini);
+  primeiroDia.setUTCHours(0, 0, 0, 0);
+  let total = 0;
+  for (let dia = primeiroDia.getTime(); dia < fi; dia += 24 * 60 * 60 * 1000) {
+    const horario = HORARIOS[new Date(dia).getUTCDay()];
+    if (!horario) continue;
+    const abre = Math.max(dia + horario.abre * 60 * 60 * 1000, ini);
+    const fecha = Math.min(dia + horario.fecha * 60 * 60 * 1000, fi);
+    if (fecha > abre) total += fecha - abre;
+  }
+  return total / 60000;
+}
+
+module.exports = { statusAgora, minutosUteis };

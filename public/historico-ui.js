@@ -129,6 +129,7 @@ function mudarPeriodoHistorico(periodo) {
 // ---------------- Indicadores ----------------
 function formatarDuracao(minutos) {
   if (!isFinite(minutos) || minutos < 0) return '—';
+  if (minutos < 1) return '< 1 min';
   if (minutos < 60) return `${Math.max(1, Math.round(minutos))} min`;
   const horas = minutos / 60;
   if (horas < 24) {
@@ -144,14 +145,28 @@ function atualizarIndicadoresHistorico(leads) {
   const agora = new Date();
   const encerradas = (leads || []).filter((l) => l.status === 'encerrado' && dataUtc(l.encerrado_em));
   const hoje = encerradas.filter((l) => passaNoPeriodoHistorico(dataUtc(l.encerrado_em), 'hoje', agora)).length;
-  const duracoes = encerradas
-    .filter((l) => passaNoPeriodoHistorico(dataUtc(l.encerrado_em), '48h', agora) && dataUtc(l.criado_em))
-    .map((l) => (dataUtc(l.encerrado_em) - dataUtc(l.criado_em)) / 60000)
-    .filter((m) => m >= 0);
-  const media = duracoes.length ? duracoes.reduce((a, b) => a + b, 0) / duracoes.length : NaN;
-  const set = (id, v) => { const el = document.getElementById(id); if (el && el.textContent !== String(v)) el.textContent = v; };
-  set('historico-kpi-hoje', hoje);
-  set('historico-kpi-tempo', duracoes.length ? formatarDuracao(media) : '—');
+  const el = document.getElementById('historico-kpi-hoje');
+  if (el && el.textContent !== String(hoje)) el.textContent = hoje;
+  atualizarTempoRespostaHistorico();
+}
+
+// O tempo médio de resposta vem pronto do servidor — precisa das mensagens,
+// que a lista não traz. A lista se redesenha a cada poucos segundos; o
+// indicador só é buscado com a tela aberta e no máximo 1 vez por minuto.
+let tempoRespostaBuscadoEm = 0;
+async function atualizarTempoRespostaHistorico() {
+  const view = document.getElementById('view-historico');
+  if (!view || view.hidden || Date.now() - tempoRespostaBuscadoEm < 60000) return;
+  tempoRespostaBuscadoEm = Date.now();
+  try {
+    const res = await fetch(`${API}/api/indicadores/tempo-resposta?setor=${setorAtivo}`);
+    if (!res.ok) return;
+    const dados = await res.json();
+    const el = document.getElementById('historico-kpi-tempo');
+    if (el) el.textContent = dados.media_min === null ? '—' : formatarDuracao(dados.media_min);
+  } catch (e) {
+    tempoRespostaBuscadoEm = 0; // falha de rede: tenta de novo no próximo redesenho
+  }
 }
 
 // ---------------- Painel de conversa compartilhado ----------------

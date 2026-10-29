@@ -478,7 +478,7 @@ async function carregarProgresso() {
   if (!res.ok) return;
   const dados = await res.json();
 
-  document.getElementById('progresso-total').textContent = `${dados.total} pedido${dados.total === 1 ? '' : 's'}`;
+  document.getElementById('progresso-total').textContent = `${dados.total} encerrada${dados.total === 1 ? '' : 's'}`;
   document.getElementById('progresso-media').textContent = dados.mediaPorDia;
 
   const compEl = document.getElementById('progresso-comparacao');
@@ -486,12 +486,12 @@ async function carregarProgresso() {
   compEl.textContent = `${sinal}${dados.comparacao}% vs período anterior`;
   compEl.style.color = dados.comparacao > 0 ? 'var(--green)' : dados.comparacao < 0 ? 'var(--red)' : 'var(--muted)';
 
-  const rotuloGranularidade = { diario: 'DIÁRIA', semanal: 'SEMANAL', mensal: 'MENSAL' }[progressoGranularidade];
-  document.getElementById('progresso-grafico-titulo').textContent = `VENDAS · ${rotuloGranularidade}`;
+  const rotuloGranularidade = { diario: 'POR DIA', semanal: 'POR SEMANA', mensal: 'POR MÊS' }[progressoGranularidade];
+  document.getElementById('progresso-grafico-titulo').textContent = `CONVERSAS ENCERRADAS · ${rotuloGranularidade}`;
 
   const grafico = document.getElementById('progresso-grafico');
   if (dados.buckets.length === 0) {
-    grafico.innerHTML = `<div class="empty-state" style="width:100%;">Nenhuma venda registrada nesse período ainda.</div>`;
+    grafico.innerHTML = `<div class="empty-state" style="width:100%;">Nenhuma conversa encerrada nesse período ainda.</div>`;
     return;
   }
   const maiorValor = Math.max(...dados.buckets.map((b) => b.value), 1);
