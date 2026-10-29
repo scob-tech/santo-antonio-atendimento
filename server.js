@@ -2493,6 +2493,74 @@ app.delete('/api/figurinhas/:id', requireAuth, requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------------------------------------------------------------
+// ATALHOS DE VENDAS — dados de pagamento (PIX/conta) e endereços das lojas
+// que o vendedor manda com 1 clique no composer. Qualquer usuário logado
+// LÊ (precisa pra enviar); só o admin cadastra/edita/remove, e fica
+// registrado quem mudou por último e quando.
+// ---------------------------------------------------------------
+const CAMPOS_PAGAMENTO = ['favorecido', 'tipo_chave', 'chave_pix', 'banco', 'agencia', 'conta'];
+const TIPOS_LOJA = ['loja', 'galpao'];
+
+function textoLimpo(valor, max) {
+  return String(valor == null ? '' : valor).replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function nomeUsuario(id) {
+  const u = id ? db.prepare('SELECT nome FROM vendedores WHERE id = ?').get(id) : null;
+  return u ? u.nome : null;
+}
+
+app.get('/api/atalhos-vendas', requireAuth, (req, res) => {
+  const cfg = db.prepare("SELECT valor, atualizado_por, atualizado_em FROM configuracoes WHERE chave = 'dados_pagamento'").get();
+  let pagamento = null;
+  if (cfg) {
+    try { pagamento = JSON.parse(cfg.valor); } catch { pagamento = null; }
+    if (pagamento) { pagamento.atualizado_em = cfg.atualizado_em; pagamento.atualizado_por = nomeUsuario(cfg.atualizado_por); }
+  }
+  const lojas = db.prepare("SELECT id, nome, tipo, endereco, atualizado_por, atualizado_em FROM lojas ORDER BY tipo = 'galpao', nome COLLATE NOCASE").all()
+    .map((l) => ({ ...l, atualizado_por: nomeUsuario(l.atualizado_por) }));
+  res.json({ pagamento, lojas });
+});
+
+app.put('/api/config/pagamento', requireAuth, requireAdmin, (req, res) => {
+  const dados = {};
+  for (const campo of CAMPOS_PAGAMENTO) dados[campo] = textoLimpo(req.body[campo], 120);
+  if (!dados.favorecido || !dados.chave_pix) return res.status(400).json({ erro: 'preencha pelo menos o favorecido e a chave PIX' });
+  db.prepare(`INSERT INTO configuracoes (chave, valor, atualizado_por, atualizado_em) VALUES ('dados_pagamento', ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))
+    ON CONFLICT(chave) DO UPDATE SET valor = excluded.valor, atualizado_por = excluded.atualizado_por, atualizado_em = excluded.atualizado_em`)
+    .run(JSON.stringify(dados), req.usuario.id);
+  res.json({ ok: true });
+});
+
+function lerLojaDoCorpo(body) {
+  const loja = { nome: textoLimpo(body.nome, 60), tipo: TIPOS_LOJA.includes(body.tipo) ? body.tipo : 'loja', endereco: textoLimpo(body.endereco, 250) };
+  if (!loja.nome || !loja.endereco) return { erro: 'preencha o nome e o endereço' };
+  return { loja };
+}
+
+app.post('/api/lojas', requireAuth, requireAdmin, (req, res) => {
+  const { loja, erro } = lerLojaDoCorpo(req.body);
+  if (erro) return res.status(400).json({ erro });
+  const info = db.prepare(`INSERT INTO lojas (nome, tipo, endereco, atualizado_por, atualizado_em) VALUES (?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%f','now'))`)
+    .run(loja.nome, loja.tipo, loja.endereco, req.usuario.id);
+  res.status(201).json({ ok: true, id: info.lastInsertRowid });
+});
+
+app.put('/api/lojas/:id', requireAuth, requireAdmin, (req, res) => {
+  const { loja, erro } = lerLojaDoCorpo(req.body);
+  if (erro) return res.status(400).json({ erro });
+  const info = db.prepare(`UPDATE lojas SET nome = ?, tipo = ?, endereco = ?, atualizado_por = ?, atualizado_em = strftime('%Y-%m-%d %H:%M:%f','now') WHERE id = ?`)
+    .run(loja.nome, loja.tipo, loja.endereco, req.usuario.id, req.params.id);
+  if (info.changes === 0) return res.status(404).json({ erro: 'loja não encontrada' });
+  res.json({ ok: true });
+});
+
+app.delete('/api/lojas/:id', requireAuth, requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM lojas WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
 // Envia uma figurinha da biblioteca numa conversa.
 app.post('/api/leads/:id/figurinha', requireAuth, async (req, res) => {
   const lead = db.prepare('SELECT * FROM leads WHERE id = ?').get(req.params.id);

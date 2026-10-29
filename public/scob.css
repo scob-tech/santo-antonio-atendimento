@@ -589,6 +589,40 @@ body[data-view="historico"] .conversa-modal-footer { padding-top: 0; padding-bot
 .composer .composer-send { height: 32px; padding: 0 var(--space-3); margin-left: auto; border-radius: 9px; }
 .composer .composer-hint + .composer-send { margin-left: 0; }
 
+/* Painel de lojas (atalho de endereço, setor Vendas) */
+.lojas-painel {
+  position: absolute; bottom: 100%; left: 0; right: 0; z-index: 6; margin-bottom: 6px; padding: 6px;
+  max-height: 280px; overflow-y: auto; background: var(--card); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: 0 4px 16px rgba(0,0,0,.12);
+}
+.lojas-painel-titulo { padding: 6px 8px 4px; font: 700 11px/1.2 var(--font-sans); letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
+.lojas-painel-item {
+  display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 8px; border: none; border-radius: 8px;
+  background: none; color: var(--ink); text-align: left; cursor: pointer; font-family: var(--font-sans);
+}
+.lojas-painel-item:hover { background: var(--hover-strong); }
+.lojas-painel-item:focus-visible { outline: none; box-shadow: var(--ring); }
+.lojas-painel-item .ic { flex: none; margin-top: 2px; color: var(--brand-text); }
+.lojas-painel-item strong { display: block; font: 600 13.5px/1.3 var(--font-sans); }
+.lojas-painel-item small { display: block; margin-top: 2px; font: 400 12px/1.4 var(--font-sans); color: var(--ink-3); }
+.lojas-painel-item .ui-badge { margin-left: 6px; vertical-align: 1px; }
+.lojas-painel-vazio { padding: 10px 8px; font: 400 12.5px/1.45 var(--font-sans); color: var(--ink-3); }
+
+/* Configurações → Pagamento e endereços */
+.atalho-preview-rotulo { margin: 14px 0 6px; font: 500 12.5px/1.2 var(--font-sans); color: var(--ink-2); }
+.atalho-preview {
+  padding: var(--space-3) 14px; border-radius: var(--radius-md); background: var(--surface-sunken);
+  font: 400 13px/1.5 var(--font-sans); color: var(--ink); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.lojas-config-meta { font: 400 12px/1.4 var(--font-sans); color: var(--ink-3); }
+#config-atalhos .settings-inline .lojas-config-meta { margin-left: auto; }
+#config-atalhos .settings-row .ui-badge { margin-left: 6px; vertical-align: 1px; }
+.lojas-config-full { grid-column: 1 / -1; }
+.lojas-config-form { margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--line); }
+.lojas-config-form h4 { margin: 0 0 var(--space-3); font: 600 13px/1.2 var(--font-sans); color: var(--ink); }
+.lojas-config-add { margin-top: var(--space-4); }
+.lojas-config-add[hidden] { display: none; }
+
 /* Painéis que abrem acima do campo (!important: estilos inline no HTML) */
 #conversa-mencoes-dropdown, #emoji-painel, #figurinhas-painel {
   border: none !important; border-radius: var(--radius-lg) !important; box-shadow: var(--shadow-pop) !important;

@@ -147,6 +147,8 @@ function atualizarPainelTitulo() {
   // nem comparativo de vendas, então o item some do menu pra eles.
   const navProgresso = document.getElementById('nav-item-progresso');
   if (navProgresso) navProgresso.style.display = setorAtivo === 'vendas' ? 'flex' : 'none';
+  // Atalhos de PIX e endereço da loja no composer — também só em Vendas.
+  if (typeof atualizarAtalhosVendas === 'function') atualizarAtalhosVendas();
 
   // Histórico de relatórios (gargalo de negociação) só existe pro
   // Financeiro, e só admin acessa.
@@ -201,6 +203,7 @@ function mudarView(nome) {
   // Agenda e usuários atualizam sozinhos só a cada 30s — ao abrir a tela, busca na hora.
   if (nome === 'agenda') carregarLembretes();
   if (nome === 'configuracoes') carregarVendedores();
+  if (nome === 'configuracoes' && typeof renderizarConfigAtalhos === 'function') renderizarConfigAtalhos();
   fecharMenuMobile();
 }
 
@@ -533,6 +536,8 @@ function renderizarUserBox() {
     if (setorAtivo === 'vendas') {
       document.getElementById('config-metas').style.display = 'block';
       popularSelectVendedoresMetas();
+      // Pagamento e endereços (atalhos do composer) — atalhos-vendas.js.
+      if (typeof renderizarConfigAtalhos === 'function') renderizarConfigAtalhos();
     }
     renderizarCheckboxesSetores();
     btnCadastro.style.display = 'inline-block';
@@ -2001,6 +2006,7 @@ const EMOJIS = {
 function alternarEmojis() {
   const p = document.getElementById('emoji-painel');
   const f = document.getElementById('figurinhas-painel'); if (f) f.style.display = 'none';
+  if (typeof fecharPainelLojas === 'function') fecharPainelLojas();
   const abrir = p.style.display !== 'block';
   p.style.display = abrir ? 'block' : 'none';
   if (abrir && !p.dataset.montado) { montarEmojis(); p.dataset.montado = '1'; }
@@ -2030,6 +2036,7 @@ function inserirEmoji(emoji) {
 function alternarFigurinhas() {
   const p = document.getElementById('figurinhas-painel');
   const e = document.getElementById('emoji-painel'); if (e) e.style.display = 'none';
+  if (typeof fecharPainelLojas === 'function') fecharPainelLojas();
   const abrir = p.style.display !== 'block';
   p.style.display = abrir ? 'block' : 'none';
   if (abrir) carregarFigurinhas();

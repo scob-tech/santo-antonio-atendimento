@@ -14,7 +14,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/scob.css?v=20260921s1" />
+<link rel="stylesheet" href="/scob.css?v=20261028s2" />
 </head>
 <body data-view="inicio">
   <div class="app-shell">
@@ -282,6 +282,7 @@
                         <div id="conversa-mencoes-dropdown" style="display:none; position:absolute; bottom:100%; left:0; right:0; margin-bottom:6px; background:var(--card); border:1px solid var(--border); border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,.12); max-height:160px; overflow-y:auto; z-index:5;"></div>
                         <div id="emoji-painel" style="display:none; position:absolute; bottom:100%; left:0; right:0; margin-bottom:6px; background:var(--card); border:1px solid var(--border); border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,.12); max-height:240px; overflow-y:auto; z-index:6; padding:8px;"></div>
                         <div id="figurinhas-painel" style="display:none; position:absolute; bottom:100%; left:0; right:0; margin-bottom:6px; background:var(--card); border:1px solid var(--border); border-radius:10px; box-shadow:0 4px 16px rgba(0,0,0,.12); max-height:240px; overflow-y:auto; z-index:6; padding:10px;"></div>
+                        <div id="lojas-painel" class="lojas-painel" style="display:none;"></div>
                         <textarea id="conversa-texto" class="conversa-modal-input" rows="1" placeholder="Escreva uma mensagem" autocomplete="off" oninput="aoDigitarMensagem(this)" onkeydown="aoTeclarMensagem(event)"></textarea>
                       </div>
                       <div class="composer-bar">
@@ -292,6 +293,8 @@
                         <button type="button" class="ui-icon-btn" id="btn-audio" title="Gravar áudio" aria-label="Gravar áudio" onclick="alternarGravacaoAudio()"><span data-icon="mic" data-size="18"></span></button>
                         <button type="button" class="ui-icon-btn" id="btn-emoji" title="Emojis" aria-label="Emojis" onclick="alternarEmojis()"><span data-icon="smile" data-size="18"></span></button>
                         <button type="button" class="ui-icon-btn" id="btn-figurinhas" title="Figurinhas" aria-label="Figurinhas" onclick="alternarFigurinhas()"><span data-icon="sticker" data-size="18"></span></button>
+                        <button type="button" class="ui-icon-btn" id="btn-pix" title="Enviar dados do PIX" aria-label="Enviar dados do PIX" onclick="enviarDadosPix()" style="display:none;"><span data-icon="pix" data-size="18"></span></button>
+                        <button type="button" class="ui-icon-btn" id="btn-endereco" title="Enviar endereço da loja" aria-label="Enviar endereço da loja" aria-haspopup="true" aria-expanded="false" aria-controls="lojas-painel" onclick="alternarPainelLojas()" style="display:none;"><span data-icon="map-pin" data-size="18"></span></button>
                         <span class="composer-hint">Enter envia · Shift+Enter quebra linha</span>
                         <button type="submit" class="ui-btn ui-btn--primary composer-send"><span data-icon="send" data-size="16"></span>Enviar</button>
                       </div>
@@ -669,6 +672,57 @@
                   <span class="settings-row-text"><strong>Armazenamento</strong><span>Espaço usado por mídias e compactação.</span></span>
                   <span class="settings-link-chevron" data-icon="chevron-right" data-size="16"></span>
                 </button>
+              </div>
+            </section>
+
+            <!-- Pagamento e endereços: só admin, só Vendas (atalhos do composer — atalhos-vendas.js) -->
+            <section class="settings-card settings-card--wide" id="config-atalhos" style="display:none;">
+              <header class="settings-head">
+                <span class="settings-icon"><span data-icon="pix" data-size="18"></span></span>
+                <div class="settings-head-text">
+                  <h2>Pagamento e endereços</h2>
+                  <p>Dados que os vendedores enviam com um clique nos botões de PIX e de localização da conversa.</p>
+                </div>
+              </header>
+
+              <div class="settings-section">
+                <h3 class="settings-section-title">Dados de pagamento</h3>
+                <div class="settings-fields">
+                  <label class="ui-field"><span>Favorecido (razão social)</span><input type="text" id="pag-favorecido" maxlength="120" autocomplete="off" oninput="atualizarPreviewPagamento()" /></label>
+                  <label class="ui-field"><span>Tipo da chave PIX</span><select id="pag-tipo_chave" onchange="atualizarPreviewPagamento()"></select></label>
+                  <label class="ui-field"><span>Chave PIX</span><input type="text" id="pag-chave_pix" maxlength="120" autocomplete="off" oninput="atualizarPreviewPagamento()" /></label>
+                  <label class="ui-field"><span>Banco</span><input type="text" id="pag-banco" maxlength="120" autocomplete="off" oninput="atualizarPreviewPagamento()" /></label>
+                  <label class="ui-field"><span>Agência</span><input type="text" id="pag-agencia" maxlength="120" autocomplete="off" oninput="atualizarPreviewPagamento()" /></label>
+                  <label class="ui-field"><span>Conta (com dígito)</span><input type="text" id="pag-conta" maxlength="120" autocomplete="off" oninput="atualizarPreviewPagamento()" /></label>
+                </div>
+                <div class="atalho-preview-rotulo">Mensagem que o cliente recebe <span class="lojas-config-meta">(o texto entre *asteriscos* aparece em negrito no WhatsApp)</span></div>
+                <div class="atalho-preview" id="pag-preview"></div>
+                <div class="settings-inline">
+                  <div class="msg" id="pag-msg"></div>
+                  <span class="lojas-config-meta" id="pag-atualizacao"></span>
+                  <button type="button" class="ui-btn ui-btn--primary ui-btn--sm" onclick="salvarDadosPagamento()"><span data-icon="check" data-size="16"></span>Salvar dados</button>
+                </div>
+              </div>
+
+              <div class="settings-section">
+                <h3 class="settings-section-title">Lojas e galpões</h3>
+                <div class="settings-list" id="lojas-config-lista"></div>
+                <div class="lojas-config-form" id="loja-form" hidden>
+                  <h4 id="loja-form-titulo">Nova loja ou galpão</h4>
+                  <div class="settings-fields">
+                    <label class="ui-field"><span>Nome (como o cliente vai ver)</span><input type="text" id="loja-nome" maxlength="60" placeholder="Ex.: Depósito Santo Antônio — Moema" autocomplete="off" /></label>
+                    <label class="ui-field"><span>Tipo</span><select id="loja-tipo"><option value="loja">Loja</option><option value="galpao">Galpão</option></select></label>
+                    <label class="ui-field lojas-config-full"><span>Endereço completo</span><input type="text" id="loja-endereco" maxlength="250" placeholder="Rua, número - Bairro, Cidade - UF, CEP" autocomplete="off" /></label>
+                  </div>
+                  <div class="settings-inline">
+                    <div class="msg" id="loja-msg"></div>
+                    <div class="settings-inline-actions">
+                      <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm" onclick="fecharFormLoja()">Cancelar</button>
+                      <button type="button" class="ui-btn ui-btn--primary ui-btn--sm" onclick="salvarLoja()"><span data-icon="check" data-size="16"></span>Salvar</button>
+                    </div>
+                  </div>
+                </div>
+                <button type="button" class="ui-btn ui-btn--secondary ui-btn--sm lojas-config-add" id="btn-nova-loja" onclick="abrirFormLoja()"><span data-icon="plus" data-size="16"></span>Adicionar loja ou galpão</button>
               </div>
             </section>
 
@@ -1064,7 +1118,7 @@
     </div>
   </aside>
 
-<script src="icons.js?v=20260921s1"></script>
+<script src="icons.js?v=20261028s1"></script>
 <script src="configuracoes-ui.js?v=20260916s1"></script>
 <script src="clientes-ui.js?v=20260916s1"></script>
 <script src="historico-ui.js?v=20260916s1"></script>
@@ -1073,5 +1127,6 @@
 <script src="busca-conversa-ui.js?v=20260921s1"></script>
 <script src="audio-ogg.js?v=20260921s1"></script>
 <script src="app.js?v=20261009s1"></script>
+<script src="atalhos-vendas.js?v=20261028s2"></script>
 </body>
 </html>

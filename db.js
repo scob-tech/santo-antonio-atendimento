@@ -171,6 +171,27 @@ db.exec(`
     data TEXT PRIMARY KEY,
     executado_em TEXT NOT NULL
   );
+
+  -- Configurações simples da instalação, em chave/valor (valor em JSON).
+  -- Hoje guarda só 'dados_pagamento' (PIX/conta que o vendedor manda com 1
+  -- clique). Só o admin edita; fica registrado quem mudou e quando.
+  CREATE TABLE IF NOT EXISTS configuracoes (
+    chave TEXT PRIMARY KEY,
+    valor TEXT NOT NULL,
+    atualizado_por INTEGER,
+    atualizado_em TEXT NOT NULL
+  );
+
+  -- Lojas e galpões cujo endereço o vendedor manda pelo atalho do composer.
+  -- Cadastro feito pelo admin em Configurações. tipo: 'loja' | 'galpao'.
+  CREATE TABLE IF NOT EXISTS lojas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome TEXT NOT NULL,
+    tipo TEXT NOT NULL DEFAULT 'loja',
+    endereco TEXT NOT NULL,
+    atualizado_por INTEGER,
+    atualizado_em TEXT NOT NULL
+  );
 `);
 
 // ---------------------------------------------------------------
