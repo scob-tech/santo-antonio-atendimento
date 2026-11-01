@@ -122,8 +122,26 @@ esta rota usa o dia de Brasília e exclui grupos.
   suposição do Histórico); importações fora de ordem cronológica podem esconder
   mensagens.
 - Feriados não são considerados.
-- O limite de requisições é por IP e em memória. Atrás de proxy sem `trust
-  proxy`, todos os clientes compartilham o mesmo limite, e ele zera quando o
-  serviço reinicia.
+- O limite de requisições é por IP e em memória, e zera quando o serviço
+  reinicia.
+
+## Pendência antes de produção: limite de requisições atrás de proxy
+
+O servidor não define `trust proxy`, então `req.ip` é sempre o endereço do
+proxy (no Railway, o proxy de entrada). Teste local com um proxy reverso que
+acrescenta `X-Forwarded-For` (Etapa 3D.3):
+
+- 20 tentativas com token errado de um "cliente" (198.51.100.7) e, em
+  seguida, a consulta com o token certo de outro (192.0.2.10): a consulta
+  legítima recebeu **429**. Todos os clientes atrás do proxy compartilham o
+  mesmo limite, então quem tentar adivinhar o token bloqueia o Scob.
+- Direto, com `X-Forwarded-For` forjado e diferente a cada requisição: a 21ª
+  recebeu 429. Hoje forjar o cabeçalho não fura o limite.
+
+Ajuste necessário antes de publicar (não feito nesta etapa):
+`app.set('trust proxy', N)` com o número **real** de proxies à frente do
+serviço no Railway (valor maior que o real deixaria forjar o IP). Separar o
+limite das tentativas com token inválido das consultas autorizadas também
+evita que tentativas de terceiros bloqueiem a integração.
 - A rota não foi executada contra dados reais: valores e desempenho com o
   volume de produção não foram medidos.
