@@ -15,7 +15,8 @@ process.env.SETOR = 'vendas';
 
 const express = require('express');
 const db = require('../db');
-const { criarRotaIndicadoresVendas, calcularIndicadoresVendas } = require('../indicadores-vendas');
+const http = require('http');
+const { criarRotaIndicadoresVendas, calcularIndicadoresVendas, statusIndicadoresVendas } = require('../indicadores-vendas');
 
 const setorId = db.getSetorPorSlug('vendas').id;
 const TOKEN = 'token-ficticio-de-teste-0123456789abcdef'; // não é credencial real
@@ -156,9 +157,9 @@ test('sem dados: média nula e contagens zeradas', () => {
 // ---------------------------------------------------------------
 // HTTP
 // ---------------------------------------------------------------
-async function servidor(env, limite) {
+async function servidor(env, limites) {
   const app = express();
-  app.use(criarRotaIndicadoresVendas({ db, env, agora: () => TERCA_15H, limite }));
+  app.use(criarRotaIndicadoresVendas({ db, env, agora: () => TERCA_15H, limites }));
   const s = await new Promise((resolve) => { const srv = app.listen(0, () => resolve(srv)); });
   const base = `http://127.0.0.1:${s.address().port}/api/externo/indicadores-vendas`;
   return { base, fechar: () => new Promise((r) => s.close(r)) };
@@ -232,15 +233,89 @@ test('token não configurado ou curto demais: 503 mesmo com Authorization', asyn
   }
 });
 
-test('limite de requisições: 429 com Retry-After, inclusive para token errado', async () => {
-  const { base, fechar } = await servidor(VENDAS, { janelaMs: 60_000, max: 3 });
-  const status = [];
-  for (let i = 0; i < 3; i++) status.push((await fetch(base, comToken('errado'))).status);
-  const bloqueada = await fetch(base, comToken(TOKEN));
+const LIMITES_TESTE = { autorizadas: { janelaMs: 60_000, max: 5 }, falhas: { janelaMs: 60_000, max: 3 } };
+
+// Proxy reverso de teste: repassa à rota acrescentando X-Forwarded-For com o
+// "IP do cliente" (cabeçalho x-cliente-teste), como o proxy de entrada do Railway.
+async function proxyReverso(destino) {
+  const alvo = new URL(destino);
+  const srv = http.createServer((req, res) => {
+    const headers = { ...req.headers, 'x-forwarded-for': req.headers['x-cliente-teste'] || '203.0.113.9' };
+    const up = http.request({ host: alvo.hostname, port: alvo.port, path: req.url, method: req.method, headers }, (r) => {
+      res.writeHead(r.statusCode, r.headers);
+      r.pipe(res);
+    });
+    up.on('error', () => { res.writeHead(502); res.end(); });
+    req.pipe(up);
+  });
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+  return { base: `http://127.0.0.1:${srv.address().port}${alvo.pathname}`, fechar: () => new Promise((r) => srv.close(r)) };
+}
+const comCliente = (ip, token) => ({ headers: { 'x-cliente-teste': ip, ...(token ? { Authorization: `Bearer ${token}` } : {}) } });
+
+test('tentativas inválidas esgotam só a cota de falhas: o token válido continua aceito', async () => {
+  popularFicticio();
+  const { base, fechar } = await servidor(VENDAS, LIMITES_TESTE);
+  const falhas = [];
+  for (let i = 0; i < 6; i++) falhas.push((await fetch(base, comToken('errado'))).status);
+  const semToken = await fetch(base);
+  const valida = await fetch(base, comToken(TOKEN));
   await fechar();
-  assert.deepEqual(status, [401, 401, 401]);
-  assert.equal(bloqueada.status, 429);
-  assert.ok(Number(bloqueada.headers.get('retry-after')) > 0);
+  assert.deepEqual(falhas, [401, 401, 401, 429, 429, 429]);
+  assert.equal(semToken.status, 429);
+  assert.deepEqual(await semToken.json(), { erro: 'muitas_tentativas' });
+  assert.ok(Number(semToken.headers.get('retry-after')) > 0);
+  assert.equal(valida.status, 200);
+  validarContratoV1(await valida.json());
+});
+
+test('atrás de proxy reverso: atacante bloqueado, consulta legítima aceita', async () => {
+  popularFicticio();
+  const rota = await servidor(VENDAS, LIMITES_TESTE);
+  const proxy = await proxyReverso(rota.base);
+  const atacante = [];
+  for (let i = 0; i < 20; i++) atacante.push((await fetch(proxy.base, comCliente('198.51.100.7', 'errado'))).status);
+  const legitima = await fetch(proxy.base, comCliente('192.0.2.10', TOKEN));
+  // Outro "cliente" com token errado: mesma cota de falhas (req.ip é o do proxy).
+  const outroInvalido = await fetch(proxy.base, comCliente('192.0.2.77', 'errado'));
+  await proxy.fechar();
+  await rota.fechar();
+  assert.deepEqual(atacante.slice(0, 4), [401, 401, 401, 429]);
+  assert.ok(atacante.slice(3).every((s) => s === 429));
+  assert.equal(legitima.status, 200);
+  assert.equal(outroInvalido.status, 429);
+});
+
+test('X-Forwarded-For forjado não cria cotas novas', async () => {
+  const { base, fechar } = await servidor(VENDAS, LIMITES_TESTE);
+  const status = [];
+  for (let i = 1; i <= 5; i++) {
+    status.push((await fetch(base, { headers: { 'X-Forwarded-For': `10.0.0.${i}`, Authorization: 'Bearer errado' } })).status);
+  }
+  await fechar();
+  assert.deepEqual(status, [401, 401, 401, 429, 429]);
+});
+
+test('cota das consultas autorizadas: 429 depois do máximo, com Retry-After', async () => {
+  popularFicticio();
+  const { base, fechar } = await servidor(VENDAS, LIMITES_TESTE);
+  const status = [];
+  for (let i = 0; i < 6; i++) status.push((await fetch(base, comToken(TOKEN))).status);
+  const ultima = await fetch(base, comToken(TOKEN));
+  await fechar();
+  assert.deepEqual(status, [200, 200, 200, 200, 200, 429]);
+  assert.deepEqual(await ultima.json(), { erro: 'muitas_requisicoes' });
+  assert.ok(Number(ultima.headers.get('retry-after')) > 0);
+});
+
+test('situação da rota para o log de inicialização, sem segredos', () => {
+  assert.equal(statusIndicadoresVendas(VENDAS), 'ativa');
+  assert.match(statusIndicadoresVendas({ INDICADORES_VENDAS_TOKEN: TOKEN }), /^inativa \(SETOR/);
+  assert.match(statusIndicadoresVendas({ SETOR: 'financeiro', INDICADORES_VENDAS_TOKEN: TOKEN }), /^inativa \(SETOR/);
+  assert.match(statusIndicadoresVendas({ SETOR: 'vendas', INDICADORES_VENDAS_TOKEN: 'curto' }), /^inativa \(INDICADORES_VENDAS_TOKEN/);
+  for (const env of [VENDAS, { SETOR: 'vendas', INDICADORES_VENDAS_TOKEN: 'curto' }]) {
+    assert.ok(!statusIndicadoresVendas(env).includes(env.INDICADORES_VENDAS_TOKEN));
+  }
 });
 
 test('somente leitura e sem logs: banco igual e nada impresso no console', async () => {
@@ -307,9 +382,11 @@ test('server.js: Vendas responde o contrato; Financeiro com o mesmo token dá 40
   validarContratoV1(corpo);
   assert.equal(sem.status, 401);
   assert.ok(!vendas.saida().includes(TOKEN), 'token apareceu no log');
+  assert.match(vendas.saida(), /Indicadores de Vendas \(Scob 3D\): rota ativa/);
 
   const fin = await subirServer({ SETOR: 'financeiro', INDICADORES_VENDAS_TOKEN: TOKEN });
   const r = await fetch(fin.base, comToken(TOKEN));
   await fin.parar();
   assert.equal(r.status, 404);
+  assert.match(fin.saida(), /rota inativa \(SETOR=vendas não está definido explicitamente\)/);
 });

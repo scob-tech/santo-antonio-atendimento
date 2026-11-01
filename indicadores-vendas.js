@@ -18,7 +18,9 @@
 // - Token próprio da integração (INDICADORES_VENDAS_TOKEN, mínimo 32
 //   caracteres), diferente do RELATORIO_TOKEN e de qualquer sessão de
 //   vendedor. Sem token configurado, recusa tudo (503).
-// - Comparação do token em tempo constante e limite de requisições por IP.
+// - Comparação do token em tempo constante.
+// - Dois limites de requisições SEPARADOS (ver "LIMITES" abaixo): tentativas
+//   com token inválido nunca consomem a cota das consultas autenticadas.
 // - Nenhum log por requisição (nem IP, nem token, nem dado de conversa).
 
 const crypto = require('crypto');
@@ -26,7 +28,21 @@ const express = require('express');
 const horario = require('./horario');
 
 const TAMANHO_MINIMO_TOKEN = 32;
-const LIMITE_PADRAO = { janelaMs: 60 * 1000, max: 20 };
+// LIMITES (janela fixa de 1 min, em memória; zeram quando o serviço reinicia):
+// - autorizadas: consultas com token VÁLIDO, numa cota única da integração
+//   (só quem tem o token consome). Protege o banco se o token vazar.
+// - falhas: tentativas com token ausente ou inválido, por endereço da conexão
+//   (req.ip). Sem 'trust proxy', o X-Forwarded-For enviado pelo cliente é
+//   ignorado; atrás de um proxy, req.ip é o do proxy e a cota de falhas vira
+//   uma só para todos — o que só afeta outras tentativas inválidas.
+// O token é sempre verificado primeiro: durante o bloqueio de falhas, o token
+// certo continua sendo aceito. A defesa contra adivinhação é o tamanho do
+// token (≥ 32 caracteres aleatórios); o limite de falhas reduz o volume.
+const LIMITES_PADRAO = {
+  autorizadas: { janelaMs: 60 * 1000, max: 30 },
+  falhas: { janelaMs: 60 * 1000, max: 10 },
+};
+const MAX_CHAVES_FALHAS = 1000;
 const OFFSET_BRT = 3 * 60 * 60 * 1000; // UTC-3 fixo, igual ao horario.js
 const DIA_MS = 24 * 60 * 60 * 1000;
 
@@ -172,11 +188,14 @@ function tokenConfere(recebido, esperado) {
   return crypto.timingSafeEqual(a, b);
 }
 
-// Janela fixa por IP, em memória (reinicia junto com o servidor).
+// Janela fixa por chave, em memória (reinicia junto com o servidor). O número
+// de chaves é limitado: sem isso, muitos endereços diferentes fariam a
+// tabela crescer sem fim.
 function criarLimitador({ janelaMs, max }) {
   const contagens = new Map();
   return function permitir(chave, agoraMs) {
     for (const [k, v] of contagens) if (agoraMs - v.inicio >= janelaMs) contagens.delete(k);
+    if (!contagens.has(chave) && contagens.size >= MAX_CHAVES_FALHAS) contagens.delete(contagens.keys().next().value);
     const atual = contagens.get(chave) || { inicio: agoraMs, n: 0 };
     atual.n += 1;
     contagens.set(chave, atual);
@@ -184,9 +203,22 @@ function criarLimitador({ janelaMs, max }) {
   };
 }
 
-function criarRotaIndicadoresVendas({ db, env = process.env, agora = () => new Date(), limite = LIMITE_PADRAO }) {
+// Situação da rota nesta instalação, para o log de inicialização (sem segredos).
+function statusIndicadoresVendas(env = process.env) {
+  if ((env.SETOR || '').trim().toLowerCase() !== 'vendas') return 'inativa (SETOR=vendas não está definido explicitamente)';
+  if (!tokenConfigurado(env)) return 'inativa (INDICADORES_VENDAS_TOKEN ausente ou com menos de 32 caracteres)';
+  return 'ativa';
+}
+
+function criarRotaIndicadoresVendas({ db, env = process.env, agora = () => new Date(), limites = LIMITES_PADRAO }) {
   const router = express.Router();
-  const permitir = criarLimitador(limite);
+  const permitirAutorizada = criarLimitador(limites.autorizadas);
+  const registrarFalha = criarLimitador(limites.falhas);
+
+  function muitas(res, resultado, erro) {
+    res.set('Retry-After', String(resultado.retryAfterS));
+    return res.status(429).json({ erro });
+  }
 
   router.get('/api/externo/indicadores-vendas', (req, res) => {
     res.set({ 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
@@ -195,20 +227,20 @@ function criarRotaIndicadoresVendas({ db, env = process.env, agora = () => new D
     const setor = (env.SETOR || '').trim().toLowerCase();
     if (setor !== 'vendas') return res.status(404).json({ erro: 'nao_encontrado' });
 
-    const limiteOk = permitir(req.ip || 'desconhecido', Date.now());
-    if (!limiteOk.ok) {
-      res.set('Retry-After', String(limiteOk.retryAfterS));
-      return res.status(429).json({ erro: 'muitas_requisicoes' });
-    }
-
     const esperado = tokenConfigurado(env);
     if (!esperado) return res.status(503).json({ erro: 'nao_configurado' });
 
     const m = (req.get('authorization') || '').match(/^Bearer\s+(\S+)\s*$/i);
     if (!m || !tokenConfere(m[1], esperado)) {
+      // req.ip: endereço da conexão (sem 'trust proxy', X-Forwarded-For não conta).
+      const falha = registrarFalha(req.ip || 'desconhecido', Date.now());
+      if (!falha.ok) return muitas(res, falha, 'muitas_tentativas');
       res.set('WWW-Authenticate', 'Bearer');
       return res.status(401).json({ erro: 'nao_autorizado' });
     }
+
+    const cota = permitirAutorizada('integracao', Date.now());
+    if (!cota.ok) return muitas(res, cota, 'muitas_requisicoes');
 
     const setorObj = db.getSetorPorSlug('vendas');
     if (!setorObj) return res.status(404).json({ erro: 'nao_encontrado' });
@@ -224,4 +256,4 @@ function criarRotaIndicadoresVendas({ db, env = process.env, agora = () => new D
   return router;
 }
 
-module.exports = { criarRotaIndicadoresVendas, calcularIndicadoresVendas, cortesBrasilia, isoBrasilia };
+module.exports = { criarRotaIndicadoresVendas, calcularIndicadoresVendas, statusIndicadoresVendas, cortesBrasilia, isoBrasilia };

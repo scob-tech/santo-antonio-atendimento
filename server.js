@@ -2326,7 +2326,9 @@ app.get('/api/analises-personalizadas/:id', requireAuth, requireAdmin, (req, res
 // Só agregados, token próprio (INDICADORES_VENDAS_TOKEN) e só com SETOR=vendas
 // explícito; em qualquer outra instalação responde 404. Ver indicadores-vendas.js.
 // ---------------------------------------------------------------
-app.use(require('./indicadores-vendas').criarRotaIndicadoresVendas({ db }));
+const indicadoresVendas = require('./indicadores-vendas');
+app.use(indicadoresVendas.criarRotaIndicadoresVendas({ db }));
+console.log(`>> Indicadores de Vendas (Scob 3D): rota ${indicadoresVendas.statusIndicadoresVendas()}`);
 
 // ---------------------------------------------------------------
 // ENDPOINT EXTERNO (dashboard) — protegido por TOKEN, não por sessão.

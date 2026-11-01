@@ -27,9 +27,10 @@ Resposta `200` (`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`):
 | Situação | Status | Corpo |
 | --- | --- | --- |
 | `SETOR` diferente de `vendas`, ou **ausente** | 404 | `{"erro":"nao_encontrado"}` |
-| mais de 20 requisições por minuto do mesmo IP | 429 + `Retry-After` | `{"erro":"muitas_requisicoes"}` |
 | `INDICADORES_VENDAS_TOKEN` ausente ou com menos de 32 caracteres | 503 | `{"erro":"nao_configurado"}` |
 | token ausente, errado, fora do formato `Bearer` | 401 + `WWW-Authenticate: Bearer` | `{"erro":"nao_autorizado"}` |
+| mais de 10 tentativas inválidas por minuto do mesmo endereço de conexão | 429 + `Retry-After` | `{"erro":"muitas_tentativas"}` |
+| mais de 30 consultas **autorizadas** por minuto | 429 + `Retry-After` | `{"erro":"muitas_requisicoes"}` |
 | falha ao calcular | 500 | `{"erro":"falha_interna"}` |
 
 Parâmetros de URL são ignorados: não existe seleção de setor nem de instalação.
@@ -122,26 +123,56 @@ esta rota usa o dia de Brasília e exclui grupos.
   suposição do Histórico); importações fora de ordem cronológica podem esconder
   mensagens.
 - Feriados não são considerados.
-- O limite de requisições é por IP e em memória, e zera quando o serviço
-  reinicia.
 
-## Pendência antes de produção: limite de requisições atrás de proxy
+## Limite de requisições e proxy
 
-O servidor não define `trust proxy`, então `req.ip` é sempre o endereço do
-proxy (no Railway, o proxy de entrada). Teste local com um proxy reverso que
-acrescenta `X-Forwarded-For` (Etapa 3D.3):
+Duas cotas separadas, em memória (janela fixa de 1 minuto, zeram quando o
+serviço reinicia):
 
-- 20 tentativas com token errado de um "cliente" (198.51.100.7) e, em
-  seguida, a consulta com o token certo de outro (192.0.2.10): a consulta
-  legítima recebeu **429**. Todos os clientes atrás do proxy compartilham o
-  mesmo limite, então quem tentar adivinhar o token bloqueia o Scob.
-- Direto, com `X-Forwarded-For` forjado e diferente a cada requisição: a 21ª
-  recebeu 429. Hoje forjar o cabeçalho não fura o limite.
+| Cota | Quem consome | Limite | Chave |
+| --- | --- | --- | --- |
+| autorizadas | só consultas com o token **válido** | 30/min | uma só para a integração |
+| falhas | token ausente, errado ou malformado | 10/min | `req.ip` (endereço da conexão) |
 
-Ajuste necessário antes de publicar (não feito nesta etapa):
-`app.set('trust proxy', N)` com o número **real** de proxies à frente do
-serviço no Railway (valor maior que o real deixaria forjar o IP). Separar o
-limite das tentativas com token inválido das consultas autorizadas também
-evita que tentativas de terceiros bloqueiem a integração.
+- O token é verificado **antes** de qualquer contagem: tentativas inválidas
+  nunca consomem a cota da integração, e o token certo continua aceito mesmo
+  com a cota de falhas esgotada.
+- `trust proxy` **não** está habilitado: `X-Forwarded-For` enviado pelo cliente
+  é ignorado e não cria cotas novas. Atrás do proxy de entrada do Railway,
+  `req.ip` é o endereço do proxy, então a cota de falhas é uma só para todos os
+  clientes — o que só bloqueia outras tentativas inválidas.
+- A tabela de falhas guarda no máximo 1.000 endereços (sem crescimento
+  ilimitado quando não há proxy à frente).
+
+Validado com proxy reverso local que acrescenta `X-Forwarded-For` (Etapa 3E):
+20 tentativas inválidas de um "cliente" esgotaram a cota de falhas (429) e, em
+seguida, a consulta com o token certo de outro "cliente" foi aceita (200).
+Antes da correção (Etapa 3D.3), a mesma sequência bloqueava a consulta legítima.
+
+Limitações:
+- Durante o bloqueio, uma tentativa com o token certo ainda é aceita — não
+  há como separar o cliente legítimo sem verificar o token. A proteção contra
+  adivinhação é o tamanho do token (≥ 32 caracteres aleatórios; recomendado
+  48 bytes em base64url, ~384 bits); a cota de falhas só reduz o volume.
+- Sem `trust proxy`, não há limite de falhas por cliente real atrás do proxy.
+  Habilitar `trust proxy` só com evidência do número real de proxies à frente
+  do serviço (um valor maior que o real permitiria forjar o IP).
+- As cotas são por processo: com mais de uma réplica, cada uma conta à parte.
+
+## Horário comercial (pendente de confirmação)
+
+A primeira resposta e a maior espera usam **provisoriamente** a regra do
+`horario.js`, sem alteração nas fórmulas:
+
+- segunda a sexta: 07:00 às 18:00;
+- sábado: 08:00 às 13:00;
+- domingo: fechado;
+- feriados: ainda não considerados.
+
+Essa regra **precisa ser confirmada** pelo Depósito Santo Antônio antes da
+implantação (ver divergências acima).
+
+## Limitações gerais
+
 - A rota não foi executada contra dados reais: valores e desempenho com o
   volume de produção não foram medidos.
