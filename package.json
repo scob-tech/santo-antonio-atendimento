@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node server.js",
     "simulate": "node scripts/simulate-message.js",
-    "simulate-demo": "node scripts/simulate-demo.js"
+    "simulate-demo": "node scripts/simulate-demo.js",
+    "test": "node --test"
   },
   "dependencies": {
     "compression": "^1.8.2",

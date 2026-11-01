@@ -2322,6 +2322,13 @@ app.get('/api/analises-personalizadas/:id', requireAuth, requireAdmin, (req, res
 });
 
 // ---------------------------------------------------------------
+// INDICADORES DE VENDAS (Scob 3D Operations) — GET /api/externo/indicadores-vendas.
+// Só agregados, token próprio (INDICADORES_VENDAS_TOKEN) e só com SETOR=vendas
+// explícito; em qualquer outra instalação responde 404. Ver indicadores-vendas.js.
+// ---------------------------------------------------------------
+app.use(require('./indicadores-vendas').criarRotaIndicadoresVendas({ db }));
+
+// ---------------------------------------------------------------
 // ENDPOINT EXTERNO (dashboard) — protegido por TOKEN, não por sessão.
 // Serve a curadoria de qualidade (texto humano + métricas em JSON) do setor
 // DESTE serviço, pra um painel externo consumir. O token é definido por
