@@ -157,7 +157,34 @@ Limitações:
 - Sem `trust proxy`, não há limite de falhas por cliente real atrás do proxy.
   Habilitar `trust proxy` só com evidência do número real de proxies à frente
   do serviço (um valor maior que o real permitiria forjar o IP).
-- As cotas são por processo: com mais de uma réplica, cada uma conta à parte.
+- As cotas são por processo: com mais de uma réplica, cada uma conta à parte
+  (testado: a cota esgotada numa instância não vale na outra).
+
+### Várias instâncias
+
+- Hoje o serviço tem **uma** instância: o banco SQLite fica num volume
+  persistente, e as sessões dos vendedores e o controle de eco também ficam
+  em memória — o sistema inteiro já supõe um processo só. Réplicas com volume
+  provavelmente nem são permitidas pelo Railway **(confirmar)**.
+- Com N instâncias, os limites efetivos viram N × 30 consultas autorizadas e
+  N × 10 tentativas inválidas por minuto. Para a integração isso não muda
+  nada (o Scob consulta no máximo ~6 vezes por minuto, com reaproveitamento de
+  10 s), e a proteção contra adivinhação continua sendo o tamanho do token.
+- Um reinício zera as cotas (no máximo +10 tentativas por reinício).
+- Por isso **não** há Redis nem outro armazenamento compartilhado: só se
+  justificaria se o serviço passasse a ter réplicas E o limite global se
+  tornasse necessário.
+
+### Revisão da Etapa 3F
+
+Conferido no código e nos testes:
+- tentativas inválidas só consomem a cota de falhas; o token válido é aceito
+  mesmo com ela esgotada (testes "tentativas inválidas..." e "atrás de proxy
+  reverso");
+- a cota de consultas válidas devolve 429 `muitas_requisicoes` com
+  `Retry-After` depois do máximo e reabre na janela seguinte;
+- nenhum `app.set('trust proxy')` no projeto; `X-Forwarded-For` forjado não
+  cria cotas (teste "X-Forwarded-For forjado...").
 
 ## Horário comercial (pendente de confirmação)
 

@@ -308,6 +308,25 @@ test('cota das consultas autorizadas: 429 depois do máximo, com Retry-After', a
   assert.ok(Number(ultima.headers.get('retry-after')) > 0);
 });
 
+test('cotas: reabrem no fim da janela e são por processo (cada instância conta à parte)', async () => {
+  popularFicticio();
+  const curtos = { autorizadas: { janelaMs: 400, max: 2 }, falhas: { janelaMs: 400, max: 1 } };
+  const a = await servidor(VENDAS, curtos);
+  const b = await servidor(VENDAS, curtos); // segunda "réplica": memória própria
+  const st = async (base, token) => (await fetch(base, token ? comToken(token) : undefined)).status;
+  const seqA = [await st(a.base, TOKEN), await st(a.base, TOKEN), await st(a.base, TOKEN)];
+  const seqB = [await st(b.base, TOKEN), await st(b.base, TOKEN)];
+  const falhasA = [await st(a.base), await st(a.base)];
+  await new Promise((r) => setTimeout(r, 450));
+  const depois = [await st(a.base, TOKEN), await st(a.base)];
+  await a.fechar();
+  await b.fechar();
+  assert.deepEqual(seqA, [200, 200, 429]);
+  assert.deepEqual(seqB, [200, 200]); // a cota esgotada em A não vale em B
+  assert.deepEqual(falhasA, [401, 429]);
+  assert.deepEqual(depois, [200, 401]); // janela nova: as duas cotas reabrem
+});
+
 test('situação da rota para o log de inicialização, sem segredos', () => {
   assert.equal(statusIndicadoresVendas(VENDAS), 'ativa');
   assert.match(statusIndicadoresVendas({ INDICADORES_VENDAS_TOKEN: TOKEN }), /^inativa \(SETOR/);
