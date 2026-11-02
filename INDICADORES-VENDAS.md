@@ -164,8 +164,9 @@ Limitações:
 
 - Hoje o serviço tem **uma** instância: o banco SQLite fica num volume
   persistente, e as sessões dos vendedores e o controle de eco também ficam
-  em memória — o sistema inteiro já supõe um processo só. Réplicas com volume
-  provavelmente nem são permitidas pelo Railway **(confirmar)**.
+  em memória — o sistema inteiro já supõe um processo só. Com volume, o Railway
+  mantém um só deploy ativo por serviço (documentação do Railway), então não
+  há réplicas.
 - Com N instâncias, os limites efetivos viram N × 30 consultas autorizadas e
   N × 10 tentativas inválidas por minuto. Para a integração isso não muda
   nada (o Scob consulta no máximo ~6 vezes por minuto, com reaproveitamento de

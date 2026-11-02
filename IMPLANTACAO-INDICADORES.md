@@ -1,9 +1,14 @@
 # Implantação da rota de indicadores (checklist — NÃO executado)
 
-Preparado nas Etapas 3E/3F só com informações do repositório. Nada aqui foi
+Preparado nas Etapas 3E–3G só com informações do repositório. Nada aqui foi
 feito no Railway nem no Cloudflare. Itens marcados **(confirmar)** dependem
 do painel ou da documentação do Railway/Cloudflare e precisam ser verificados
 por quem tem acesso. A implantação só começa com autorização explícita.
+
+**Ordem entre os sistemas** (detalhada em `IMPLANTACAO.md` do Scob 3D
+Operations): Fase 1, Scob com Cloudflare Access e sem dados de Vendas; Fase 2,
+este checklist; Fase 3, conectar o Scob. Os indicadores nunca ficam
+acessíveis antes de a autenticação do Scob estar validada.
 
 ## O que muda nesta instalação
 
@@ -31,9 +36,9 @@ Variáveis existentes de Vendas que não mudam: `DATA_DIR`, `PORT`, `ZAPI_*`,
 `RELATORIO_TOKEN`, `ANTHROPIC_API_KEY`, `BOAS_VINDAS_AUTOMATICA`,
 `BACKUP_MANTER_DIAS`.
 
-Ordem obrigatória no Scob: `CF_ACCESS_*` **antes** (ou junto) das
-`VENDAS_*`. Sem o Access configurado, a rota de indicadores do Scob responde
-404 em produção — não há como ligá-la sem autenticação.
+Ordem obrigatória no Scob: `CF_ACCESS_*` **antes** das `VENDAS_*`. Em
+produção, sem o Access válido, o Scob inteiro responde 503 — não há como
+expor os indicadores sem autenticação.
 
 ## 2. Identificar a instalação de Vendas (sem consultar dados)
 
@@ -89,8 +94,9 @@ cópia fica no mesmo volume — se o volume se perder, o backup vai junto.
     entrar de novo após o reinício;
   - o controle de eco de mensagens enviadas também é em memória
     (`zapi.foiEnviadaPorNos`);
-  - com volume persistente, o serviço provavelmente fica indisponível por
-    alguns instantes durante a troca **(confirmar)**; mensagens que chegarem
+  - com volume persistente, o serviço fica indisponível por alguns instantes
+    durante a troca (documentação do Railway: um só deploy ativo por volume,
+    mesmo com healthcheck; duração **(confirmar)**); mensagens que chegarem
     da Z-API nesse intervalo dependem do reenvio da Z-API **(confirmar)**.
 - Duração estimada: 30 min (deploy + validações das seções 7 e 8), com mais
   30 min reservados para reverter.
@@ -114,8 +120,8 @@ cópia fica no mesmo volume — se o volume se perder, o backup vai junto.
 7. Log de inicialização (seções 2 e 3). Seed: com o banco de produção cheio,
    o `seed-vendas.sqlite` é ignorado — não pode aparecer `Histórico importado`.
 8. WhatsApp (seção 7) e indicadores (seção 8).
-9. Só depois, Scob: Cloudflare Access (ver o README do Scob), variáveis e
-   deploy do Scob.
+9. Só depois, Fase 3 do `IMPLANTACAO.md` do Scob (que já deve estar com o
+   Cloudflare Access validado na Fase 1): variáveis `VENDAS_*` e redeploy.
 
 ## 7. WhatsApp depois do deploy
 
@@ -146,6 +152,8 @@ De uma máquina confiável, sem colar o token em chats, tickets ou logs:
 - [ ] No Scob (depois do passo 6.9): pelo endereço oficial, login do Access e
       painel com "Dados reais"; pelo endereço direto da hospedagem do Scob,
       `401`; numa janela anônima sem login, a tela do Access.
+- [ ] O Scob consulta este serviço pelo endereço **público HTTPS**: endereços
+      internos do Railway (`*.railway.internal`) são recusados pelo Scob.
 
 ## 9. Reverter
 
@@ -160,6 +168,7 @@ De uma máquina confiável, sem colar o token em chats, tickets ou logs:
 - Banco danificado por outro motivo (não esperado): restaurar o backup da
   seção 4 conforme o procedimento do `backup.js`/Railway **(confirmar)**.
 - No Scob: remover `VENDAS_*` desliga a integração (rota 404 em produção sem
-  configuração); o Access continua protegendo o app.
+  configuração); o Access continua protegendo o app. Remover as `CF_ACCESS_*`
+  **não** reabre o Scob: ele passa a responder 503.
 - Se o token vazar: gerar outro, trocar nos dois serviços (Vendas e Scob) e
   reiniciar.
