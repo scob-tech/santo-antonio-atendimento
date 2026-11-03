@@ -48,110 +48,176 @@ function msg(leadId, remetente, quando) {
     .run(leadId, remetente, TEXTO, brt(quando));
 }
 
-// Regras do contrato v1 aceitas pelo Scob 3D Operations (parseSalesAttendance).
-function validarContratoV1(corpo) {
-  assert.deepEqual(Object.keys(corpo).sort(), ['aguardando_resposta', 'finalizadas', 'gerado_em', 'primeira_resposta_hoje', 'setor', 'versao']);
-  assert.equal(corpo.versao, 1);
+// Regras do contrato v2 aceitas pelo Scob 3D Operations (parseSalesAttendance).
+function validarContratoV2(corpo) {
+  assert.deepEqual(Object.keys(corpo).sort(), ['encerradas_hoje', 'gerado_em', 'primeira_resposta', 'setor', 'tempo_resposta', 'versao']);
+  assert.equal(corpo.versao, 2);
   assert.equal(corpo.setor, 'vendas');
-  assert.match(corpo.gerado_em, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/);
+  assert.match(corpo.gerado_em, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}-03:00$/);
   const contagem = (n) => Number.isInteger(n) && n >= 0;
   const minutos = (n) => typeof n === 'number' && Number.isFinite(n) && n >= 0;
-  assert.deepEqual(Object.keys(corpo.finalizadas).sort(), ['hoje', 'mes']);
-  assert.ok(contagem(corpo.finalizadas.hoje) && contagem(corpo.finalizadas.mes));
-  assert.deepEqual(Object.keys(corpo.aguardando_resposta).sort(), ['espera_mais_antiga_min', 'total']);
-  assert.ok(contagem(corpo.aguardando_resposta.total) && minutos(corpo.aguardando_resposta.espera_mais_antiga_min));
-  const p = corpo.primeira_resposta_hoje;
-  assert.deepEqual(Object.keys(p).sort(), ['amostras', 'media_min', 'sem_resposta']);
-  assert.ok((p.media_min === null || minutos(p.media_min)) && contagem(p.amostras) && contagem(p.sem_resposta));
+  assert.ok(contagem(corpo.encerradas_hoje));
+  for (const chave of ['primeira_resposta', 'tempo_resposta']) {
+    const t = corpo[chave];
+    assert.deepEqual(Object.keys(t).sort(), ['amostras', 'media_min', 'sem_resposta'], chave);
+    assert.ok(contagem(t.amostras) && contagem(t.sem_resposta), chave);
+    // Sem amostras, a média é nula (nunca zero).
+    assert.ok(t.amostras === 0 ? t.media_min === null : minutos(t.media_min), chave);
+  }
 }
 
 // Terça-feira, 03/11/2026, 15:00 em Brasília.
 const TERCA_15H = agoraBrt('2026-11-03 15:00');
+const calc = (agora = TERCA_15H) => calcularIndicadoresVendas(db, setorId, agora);
 
 // ---------------------------------------------------------------
-// CÁLCULO
+// 1. ENCERRADAS HOJE
 // ---------------------------------------------------------------
-test('finalizadas: dia e mês de Brasília, sem grupos, sem reabertas', () => {
+test('encerradas hoje: dia de Brasília, sem grupos, reabertas fora', () => {
   limpar();
   lead({ status: 'encerrado', encerrado: '2026-11-03 09:00' });   // hoje
+  lead({ status: 'encerrado', encerrado: '2026-11-03 00:05' });   // hoje (em UTC ainda seria 03:05 do mesmo dia)
   lead({ status: 'encerrado', encerrado: '2026-11-02 23:30' });   // ontem (em UTC já seria hoje)
-  lead({ status: 'encerrado', encerrado: '2026-10-31 22:00' });   // outubro (em UTC já seria novembro)
   lead({ status: 'encerrado', grupo: true, encerrado: '2026-11-03 10:00' });
-  lead({ status: 'em_atendimento', encerrado: '2026-11-03 08:00' }); // reaberta depois de encerrar hoje
+  lead({ status: 'em_atendimento', encerrado: '2026-11-03 08:00' }); // encerrada hoje e reaberta: não está encerrada
   lead({ status: 'novo' });
-  const r = calcularIndicadoresVendas(db, setorId, TERCA_15H);
-  assert.deepEqual(r.finalizadas, { hoje: 1, mes: 2 });
+  lead({ status: 'encerrado', encerrado: '2026-11-03 09:00', setor: setorId + 1000 }); // outro setor
+  const r = calc();
+  validarContratoV2(r);
+  assert.equal(r.encerradas_hoje, 2);
   assert.equal(r.gerado_em, '2026-11-03T15:00:00-03:00');
 });
 
-test('conversa reaberta e encerrada de novo conta uma vez, pelo último encerramento', () => {
+test('encerradas hoje: reaberta e encerrada de novo conta uma vez, pelo último encerramento', () => {
   limpar();
-  const l = lead({ status: 'encerrado', encerrado: '2026-11-03 09:30' }); // 1º encerramento foi 02/11 16:00, sobrescrito
-  msg(l, 'cliente', '2026-11-02 15:00');
-  msg(l, 'vendedor', '2026-11-02 15:10');
-  msg(l, 'cliente', '2026-11-03 09:00'); // reabriu hoje
-  msg(l, 'vendedor', '2026-11-03 09:05');
-  const r = calcularIndicadoresVendas(db, setorId, TERCA_15H);
-  assert.deepEqual(r.finalizadas, { hoje: 1, mes: 1 });
-  assert.equal(r.primeira_resposta_hoje.amostras, 1);
-  assert.equal(r.primeira_resposta_hoje.media_min, 5);
+  lead({ status: 'encerrado', encerrado: '2026-11-03 09:30' }); // o 1º encerramento (ontem) foi sobrescrito
+  assert.equal(calc().encerradas_hoje, 1);
 });
 
-test('aguardando resposta: última mensagem relevante do cliente, sem grupos, IA e nota não contam', () => {
+// ---------------------------------------------------------------
+// 2 e 3. TEMPOS DE RESPOSTA
+// ---------------------------------------------------------------
+test('primeira resposta e tempo de resposta: só humano; a primeira também entra no tempo médio', () => {
   limpar();
-  const a = lead(); msg(a, 'cliente', '2026-11-03 13:00'); msg(a, 'cliente', '2026-11-03 14:00'); // espera desde 13:00
-  const b = lead(); msg(b, 'cliente', '2026-11-03 14:50'); msg(b, 'ia', '2026-11-03 14:50');     // IA não é resposta
-  const c = lead(); msg(c, 'cliente', '2026-11-03 10:00'); msg(c, 'vendedor', '2026-11-03 10:05'); msg(c, 'nota', '2026-11-03 10:06');
-  const g = lead({ grupo: true }); msg(g, 'cliente', '2026-11-03 12:00');
-  const e = lead({ status: 'encerrado', encerrado: '2026-11-03 12:00' }); msg(e, 'cliente', '2026-11-03 11:00');
-  const r = calcularIndicadoresVendas(db, setorId, TERCA_15H);
-  assert.equal(r.aguardando_resposta.total, 2);
-  assert.equal(r.aguardando_resposta.espera_mais_antiga_min, 120);
+  const a = lead();
+  msg(a, 'cliente', '2026-11-03 10:00'); msg(a, 'cliente', '2026-11-03 10:04'); // 2ª do cliente não reinicia
+  msg(a, 'vendedor', '2026-11-03 10:10');                                       // 1ª espera: 10 min
+  msg(a, 'cliente', '2026-11-03 11:00'); msg(a, 'vendedor', '2026-11-03 11:04'); // 2ª: 4 min
+  msg(a, 'vendedor', '2026-11-03 11:05');                                       // sem espera aberta: ignorada
+  msg(a, 'cliente', '2026-11-03 12:00'); msg(a, 'vendedor', '2026-11-03 12:01'); // 3ª: 1 min
+  const b = lead();
+  msg(b, 'cliente', '2026-11-03 13:00'); msg(b, 'vendedor', '2026-11-03 13:20'); // 1ª: 20 min
+  const r = calc();
+  validarContratoV2(r);
+  assert.deepEqual(r.primeira_resposta, { media_min: 15, amostras: 2, sem_resposta: 0 });   // (10 + 20) / 2
+  assert.deepEqual(r.tempo_resposta, { media_min: 8.8, amostras: 4, sem_resposta: 0 });    // (10 + 4 + 1 + 20) / 4
 });
 
-test('primeira resposta de hoje: só humana, horário comercial, grupos fora', () => {
+test('mensagens automáticas e notas: IA não responde, nota não abre espera', () => {
   limpar();
-  const [l1, l2, l3, l4, ontem] = [lead(), lead(), lead(), lead(), lead()];
-  const g = lead({ grupo: true });
-  // Em ordem cronológica, como o sistema grava (o id cresce com o tempo).
-  msg(ontem, 'cliente', '2026-11-02 10:00'); msg(ontem, 'vendedor', '2026-11-02 10:05');
-  // Segunda 17:50 sem resposta; terça 06:30 de novo; resposta 07:10 → 10 min (seg) + 10 min (ter)
-  msg(l3, 'cliente', '2026-11-02 17:50'); msg(l3, 'cliente', '2026-11-03 06:30'); msg(l3, 'vendedor', '2026-11-03 07:10');
-  msg(g, 'cliente', '2026-11-03 09:00'); msg(g, 'vendedor', '2026-11-03 09:30');
-  msg(l1, 'cliente', '2026-11-03 10:00'); msg(l1, 'ia', '2026-11-03 10:00'); msg(l1, 'vendedor', '2026-11-03 10:12'); // 12 (IA ignorada)
-  msg(l2, 'cliente', '2026-11-03 11:00'); msg(l2, 'cliente', '2026-11-03 11:05'); msg(l2, 'vendedor', '2026-11-03 11:20'); // 20
-  msg(l4, 'cliente', '2026-11-03 14:00'); msg(l4, 'ia', '2026-11-03 14:00'); // só automática → sem resposta
-  const r = calcularIndicadoresVendas(db, setorId, TERCA_15H);
-  assert.deepEqual(r.primeira_resposta_hoje, { media_min: 17.3, amostras: 3, sem_resposta: 1 });
+  const a = lead();
+  msg(a, 'cliente', '2026-11-03 10:00'); msg(a, 'ia', '2026-11-03 10:00'); msg(a, 'vendedor', '2026-11-03 10:12'); // 12 (IA ignorada)
+  const b = lead();
+  msg(b, 'nota', '2026-11-03 09:00'); msg(b, 'vendedor', '2026-11-03 09:30');     // nota não é cliente: nada a medir
+  const c = lead();
+  msg(c, 'cliente', '2026-11-03 14:00'); msg(c, 'ia', '2026-11-03 14:00');         // só automática: sem resposta
+  const r = calc();
+  assert.deepEqual(r.primeira_resposta, { media_min: 12, amostras: 1, sem_resposta: 1 });
+  assert.deepEqual(r.tempo_resposta, { media_min: 12, amostras: 1, sem_resposta: 1 });
 });
 
-test('fora do expediente: domingo e noite não contam', () => {
+test('grupos e outros setores não entram nos tempos', () => {
   limpar();
-  // Sábado 12:50 → segunda 07:05: 10 min (sáb até 13:00) + 5 min (seg)
-  const l = lead(); msg(l, 'cliente', '2026-10-31 12:50'); msg(l, 'cliente', '2026-11-02 06:00'); msg(l, 'vendedor', '2026-11-02 07:05');
-  const r = calcularIndicadoresVendas(db, setorId, agoraBrt('2026-11-02 08:00'));
-  assert.deepEqual(r.primeira_resposta_hoje, { media_min: 15, amostras: 1, sem_resposta: 0 });
+  const g = lead({ grupo: true }); msg(g, 'cliente', '2026-11-03 09:00'); msg(g, 'vendedor', '2026-11-03 09:30');
+  const o = lead({ setor: setorId + 1000 }); msg(o, 'cliente', '2026-11-03 09:00'); msg(o, 'vendedor', '2026-11-03 09:40');
+  const gAberto = lead({ grupo: true }); msg(gAberto, 'cliente', '2026-11-03 14:00');
+  const r = calc();
+  assert.deepEqual(r.primeira_resposta, { media_min: null, amostras: 0, sem_resposta: 0 });
+  assert.deepEqual(r.tempo_resposta, { media_min: null, amostras: 0, sem_resposta: 0 });
 });
 
-test('virada de dia e de mês em Brasília', () => {
+test('virada de dia: agrupa pelo dia da resposta humana', () => {
   limpar();
-  lead({ status: 'encerrado', encerrado: '2026-10-31 22:00' });
-  lead({ status: 'encerrado', encerrado: '2026-10-30 23:00' });
-  lead({ status: 'encerrado', encerrado: '2026-10-05 10:00' });
-  const sab = calcularIndicadoresVendas(db, setorId, agoraBrt('2026-10-31 23:30'));
-  assert.deepEqual(sab.finalizadas, { hoje: 1, mes: 3 });
-  assert.equal(sab.gerado_em, '2026-10-31T23:30:00-03:00');
-  const dom = calcularIndicadoresVendas(db, setorId, agoraBrt('2026-11-01 00:30'));
-  assert.deepEqual(dom.finalizadas, { hoje: 0, mes: 0 });
-  assert.equal(dom.gerado_em, '2026-11-01T00:30:00-03:00');
+  // Segunda 17:50, resposta terça 07:10 → conta na terça: 10 min (seg) + 10 min (ter).
+  const a = lead(); msg(a, 'cliente', '2026-11-02 17:50'); msg(a, 'cliente', '2026-11-03 06:30'); msg(a, 'vendedor', '2026-11-03 07:10');
+  // Respondida ontem: não conta hoje.
+  const b = lead(); msg(b, 'cliente', '2026-11-02 10:00'); msg(b, 'vendedor', '2026-11-02 10:05');
+  // Respondida hoje às 00:10 (fora do expediente): 0 min de expediente, conta hoje.
+  const c = lead(); msg(c, 'cliente', '2026-11-02 23:50'); msg(c, 'vendedor', '2026-11-03 00:10');
+  const r = calc();
+  assert.deepEqual(r.primeira_resposta, { media_min: 10, amostras: 2, sem_resposta: 0 }); // (20 + 0) / 2
+  // Às 23:59 de segunda, só a de segunda contava.
+  const seg = calc(agoraBrt('2026-11-02 23:59'));
+  assert.deepEqual(seg.tempo_resposta, { media_min: 5, amostras: 1, sem_resposta: 2 }); // a e c ainda esperando
+  assert.equal(seg.gerado_em, '2026-11-02T23:59:00-03:00');
 });
 
-test('sem dados: média nula e contagens zeradas', () => {
+test('expediente: noite, sábado à tarde e domingo não contam', () => {
   limpar();
-  const r = calcularIndicadoresVendas(db, setorId, TERCA_15H);
-  validarContratoV1(r);
-  assert.deepEqual(r.primeira_resposta_hoje, { media_min: null, amostras: 0, sem_resposta: 0 });
-  assert.deepEqual(r.aguardando_resposta, { total: 0, espera_mais_antiga_min: 0 });
+  // Sábado 12:50 → segunda 07:05: 10 min (sábado até 13:00) + 5 min (segunda).
+  const a = lead(); msg(a, 'cliente', '2026-10-31 12:50'); msg(a, 'cliente', '2026-11-01 15:00'); msg(a, 'vendedor', '2026-11-02 07:05');
+  // Sábado 12:58 → segunda 07:01: 2 min (sábado) + 1 min (segunda); domingo fechado.
+  const b = lead(); msg(b, 'cliente', '2026-10-31 12:58'); msg(b, 'vendedor', '2026-11-02 07:01');
+  // Sexta 17:55 → segunda 07:01: 5 min + 300 min de sábado (aberto 08:00–13:00) + 1 min.
+  const c = lead(); msg(c, 'cliente', '2026-10-30 17:55'); msg(c, 'vendedor', '2026-11-02 07:01');
+  const r = calc(agoraBrt('2026-11-02 08:00'));
+  assert.deepEqual(r.primeira_resposta, { media_min: 108, amostras: 3, sem_resposta: 0 }); // (15 + 3 + 306) / 3
+});
+
+test('reabertura: a primeira espera depois do último encerramento é primeira resposta de novo', () => {
+  limpar();
+  // Ciclo 1 (ontem): respondida e depois uma espera sem resposta; encerrada ontem 17:00.
+  // Ciclo 2 (hoje): cliente volta às 09:00 (reabre), resposta 09:06; depois 10:00 → 10:02.
+  const a = lead({ status: 'em_atendimento', encerrado: '2026-11-02 17:00' });
+  msg(a, 'cliente', '2026-11-02 15:00'); msg(a, 'vendedor', '2026-11-02 15:10');
+  msg(a, 'cliente', '2026-11-02 16:00');                                          // sem resposta até o encerramento
+  msg(a, 'cliente', '2026-11-03 09:00'); msg(a, 'vendedor', '2026-11-03 09:06');   // nova 1ª espera: 6 min (não desde 16:00)
+  msg(a, 'cliente', '2026-11-03 10:00'); msg(a, 'vendedor', '2026-11-03 10:02');   // seguinte: 2 min
+  const r = calc();
+  assert.deepEqual(r.primeira_resposta, { media_min: 6, amostras: 1, sem_resposta: 0 });
+  assert.deepEqual(r.tempo_resposta, { media_min: 4, amostras: 2, sem_resposta: 0 });
+});
+
+test('reabertura pelo vendedor: a resposta seguinte do cliente abre a primeira espera do novo ciclo', () => {
+  limpar();
+  const a = lead({ status: 'em_atendimento', encerrado: '2026-11-02 17:00' });
+  msg(a, 'cliente', '2026-11-02 15:00'); msg(a, 'vendedor', '2026-11-02 15:10');
+  msg(a, 'vendedor', '2026-11-03 09:00');                                         // vendedor reabre escrevendo
+  msg(a, 'cliente', '2026-11-03 09:30'); msg(a, 'vendedor', '2026-11-03 09:33');   // 1ª espera do ciclo: 3 min
+  const r = calc();
+  assert.deepEqual(r.primeira_resposta, { media_min: 3, amostras: 1, sem_resposta: 0 });
+});
+
+test('conversa iniciada pelo vendedor: a primeira resposta é a do retorno do cliente', () => {
+  limpar();
+  const a = lead();
+  msg(a, 'vendedor', '2026-11-03 08:00');                                         // contato ativo, sem espera
+  msg(a, 'cliente', '2026-11-03 09:00'); msg(a, 'vendedor', '2026-11-03 09:07');   // 7 min
+  const r = calc();
+  assert.deepEqual(r.primeira_resposta, { media_min: 7, amostras: 1, sem_resposta: 0 });
+  assert.deepEqual(r.tempo_resposta, { media_min: 7, amostras: 1, sem_resposta: 0 });
+});
+
+test('sem resposta: esperas em andamento em conversas abertas, fora da média', () => {
+  limpar();
+  const a = lead(); msg(a, 'cliente', '2026-11-03 13:00');                         // 1ª espera do ciclo, aberta
+  const b = lead(); msg(b, 'cliente', '2026-11-03 10:00'); msg(b, 'vendedor', '2026-11-03 10:05');
+  msg(b, 'cliente', '2026-11-03 14:00');                                          // espera seguinte, aberta
+  const c = lead({ status: 'encerrado', encerrado: '2026-11-03 12:00' });
+  msg(c, 'cliente', '2026-11-03 11:00');                                          // encerrada sem resposta: não está em andamento
+  const d = lead(); msg(d, 'cliente', '2026-10-20 10:00');                         // aberta há dias: continua contando
+  const r = calc();
+  assert.deepEqual(r.primeira_resposta, { media_min: 5, amostras: 1, sem_resposta: 2 }); // a e d
+  assert.deepEqual(r.tempo_resposta, { media_min: 5, amostras: 1, sem_resposta: 3 });    // a, b e d
+});
+
+test('sem dados: médias nulas e contagens zeradas', () => {
+  limpar();
+  const r = calc();
+  validarContratoV2(r);
+  assert.equal(r.encerradas_hoje, 0);
+  assert.deepEqual(r.primeira_resposta, { media_min: null, amostras: 0, sem_resposta: 0 });
+  assert.deepEqual(r.tempo_resposta, { media_min: null, amostras: 0, sem_resposta: 0 });
 });
 
 // ---------------------------------------------------------------
@@ -173,7 +239,7 @@ function popularFicticio() {
   const b = lead({ status: 'encerrado', encerrado: '2026-11-03 11:00' }); msg(b, 'cliente', '2026-11-03 10:00'); msg(b, 'vendedor', '2026-11-03 10:07');
 }
 
-test('Vendas com token correto: 200, contrato v1, no-store, sem dados pessoais', async () => {
+test('Vendas com token correto: 200, contrato v2, no-store, sem dados pessoais', async () => {
   popularFicticio();
   const { base, fechar } = await servidor(VENDAS);
   const res = await fetch(`${base}?setor=financeiro&instalacao=outra`, comToken(TOKEN));
@@ -183,9 +249,9 @@ test('Vendas com token correto: 200, contrato v1, no-store, sem dados pessoais',
   assert.equal(res.headers.get('cache-control'), 'no-store');
   assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
   const corpo = JSON.parse(texto);
-  validarContratoV1(corpo);
+  validarContratoV2(corpo);
   assert.equal(corpo.setor, 'vendas'); // parâmetro de setor é ignorado
-  assert.deepEqual(corpo.finalizadas, { hoje: 1, mes: 1 });
+  assert.equal(corpo.encerradas_hoje, 1);
   for (const proibido of [...NOMES, ...TELEFONES, TEXTO, '98765', 'valor', 'telefone', 'nome', 'financeiro']) {
     assert.ok(!texto.includes(proibido), `resposta contém "${proibido}"`);
   }
@@ -266,7 +332,7 @@ test('tentativas inválidas esgotam só a cota de falhas: o token válido contin
   assert.deepEqual(await semToken.json(), { erro: 'muitas_tentativas' });
   assert.ok(Number(semToken.headers.get('retry-after')) > 0);
   assert.equal(valida.status, 200);
-  validarContratoV1(await valida.json());
+  validarContratoV2(await valida.json());
 });
 
 test('atrás de proxy reverso: atacante bloqueado, consulta legítima aceita', async () => {
@@ -398,7 +464,7 @@ test('server.js: Vendas responde o contrato; Financeiro com o mesmo token dá 40
   await vendas.parar();
   assert.equal(ok.status, 200);
   assert.equal(ok.headers.get('cache-control'), 'no-store');
-  validarContratoV1(corpo);
+  validarContratoV2(corpo);
   assert.equal(sem.status, 401);
   assert.ok(!vendas.saida().includes(TOKEN), 'token apareceu no log');
   assert.match(vendas.saida(), /Indicadores de Vendas \(Scob 3D\): rota ativa/);

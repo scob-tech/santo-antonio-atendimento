@@ -143,7 +143,7 @@ De uma máquina confiável, sem colar o token em chats, tickets ou logs:
 
 - [ ] Sem token: `401` com `{"erro":"nao_autorizado"}`.
 - [ ] Com token: `200`, `Cache-Control: no-store`, corpo só com os campos do
-      contrato v1, `setor: "vendas"`, `gerado_em` com `-03:00`.
+      contrato v2, `setor: "vendas"`, `gerado_em` com `-03:00`.
 - [ ] Tempo de resposta (ex.: `curl -w "%{time_total}"`): anotar; acima de 1 s,
       investigar antes de ligar o Scob.
 - [ ] "Finalizadas hoje" confere com a tela de Histórico/Progresso (o

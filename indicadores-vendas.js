@@ -2,10 +2,11 @@
 // ENDPOINT EXTERNO DE INDICADORES DE VENDAS — GET /api/externo/indicadores-vendas
 //
 // Fornece ao Scob 3D Operations só números AGREGADOS do atendimento de
-// Vendas (contrato v1): conversas finalizadas hoje e no mês, conversas
-// aguardando resposta e tempo médio de primeira resposta de hoje. Nenhum
-// nome, telefone, texto de mensagem, valor de venda ou dado do Financeiro.
-// Somente leitura: nada aqui altera conversas ou mensagens.
+// Vendas (contrato v2), exatamente três indicadores do dia (Brasília):
+// conversas encerradas hoje, tempo médio até a primeira resposta humana e
+// tempo médio de resposta humana — os dois tempos com amostras e esperas
+// sem resposta. Nenhum nome, telefone, texto de mensagem, valor de venda ou
+// dado do Financeiro. Somente leitura: nada aqui altera conversas ou mensagens.
 //
 // Fórmulas, divergências com os relatórios atuais e limitações estão em
 // INDICADORES-VENDAS.md.
@@ -61,12 +62,10 @@ function paraFormatoBanco(data) {
   return data.toISOString().replace('T', ' ').replace('Z', '');
 }
 
-// Início do dia e do mês de Brasília que contêm "agora", em UTC.
-function cortesBrasilia(agora) {
+// Início do dia de Brasília que contém "agora", em UTC.
+function inicioDoDiaBrasilia(agora) {
   const brt = new Date(agora.getTime() - OFFSET_BRT);
-  const inicioDia = Date.UTC(brt.getUTCFullYear(), brt.getUTCMonth(), brt.getUTCDate()) + OFFSET_BRT;
-  const inicioMes = Date.UTC(brt.getUTCFullYear(), brt.getUTCMonth(), 1) + OFFSET_BRT;
-  return { inicioDia: new Date(inicioDia), inicioMes: new Date(inicioMes) };
+  return new Date(Date.UTC(brt.getUTCFullYear(), brt.getUTCMonth(), brt.getUTCDate()) + OFFSET_BRT);
 }
 
 // ISO 8601 com o fuso de Brasília explícito, ex.: "2026-11-01T12:00:00-03:00".
@@ -77,99 +76,111 @@ function isoBrasilia(data) {
 const arredondar1 = (n) => Math.round(n * 10) / 10;
 
 // ---------------------------------------------------------------
+// ESPERAS — regras (ver INDICADORES-VENDAS.md):
+// - Só contam mensagens 'cliente' e 'vendedor' (humano: painel, celular,
+//   encaminhamento, figurinha). 'ia' (automática) e 'nota' (interna) são
+//   ignoradas: não abrem nem respondem espera.
+// - Espera: começa na primeira mensagem do cliente depois da última resposta
+//   humana (ou do início do ciclo); mensagens seguintes do cliente não
+//   reiniciam o relógio. Termina na próxima mensagem do vendedor.
+// - Ciclo de atendimento: começa na criação da conversa ou na primeira
+//   mensagem depois do último encerramento registrado (conversa reaberta).
+//   Só o ÚLTIMO encerramento fica no banco (leads.encerrado_em): ciclos de
+//   reaberturas anteriores não são distinguidos (limitação aceita).
+// - A primeira espera RESPONDIDA de cada ciclo é a "primeira resposta".
+// ---------------------------------------------------------------
+function esperasDaConversa(mensagens, encerradoEm) {
+  const encerramento = encerradoEm ? lerDataBanco(encerradoEm) : null;
+  const respondidas = [];
+  let aberta = null;
+  let respondidaNoCiclo = false;
+  let anterior = null;
+  for (const m of mensagens) {
+    const em = lerDataBanco(m.criado_em);
+    if (encerramento && anterior && anterior <= encerramento && em > encerramento) {
+      // Reaberta: a espera do ciclo anterior terminou no encerramento, sem resposta.
+      aberta = null;
+      respondidaNoCiclo = false;
+    }
+    anterior = em;
+    if (m.remetente === 'cliente') {
+      if (!aberta) aberta = { inicio: em, primeira: !respondidaNoCiclo };
+    } else if (aberta) {
+      respondidas.push({ ...aberta, resposta: em });
+      respondidaNoCiclo = true;
+      aberta = null;
+    }
+  }
+  return { respondidas, aberta };
+}
+
+const media = (valores) => (valores.length ? arredondar1(valores.reduce((a, b) => a + b, 0) / valores.length) : null);
+
+// ---------------------------------------------------------------
 // CÁLCULO — só lê colunas de status, datas, remetente e ids. Nunca seleciona
 // texto, telefone, nome ou valores.
 // ---------------------------------------------------------------
 function calcularIndicadoresVendas(db, setorId, agora = new Date()) {
-  const { inicioDia, inicioMes } = cortesBrasilia(agora);
-  const agoraBanco = paraFormatoBanco(agora);
+  const inicioDia = inicioDoDiaBrasilia(agora);
+  const desde = paraFormatoBanco(inicioDia);
+  const ate = paraFormatoBanco(agora);
 
-  // FINALIZADAS: conversas (não grupo) com status encerrado cujo último
-  // encerramento (encerrado_em) caiu no dia / mês de Brasília.
-  const contarEncerradas = (desde) => db.prepare(`
+  // 1. ENCERRADAS HOJE: conversas (não grupo) encerradas, com o último
+  // encerramento (encerrado_em) no dia de Brasília.
+  const encerradasHoje = db.prepare(`
     SELECT COUNT(*) AS n FROM leads
     WHERE setor_id = ? AND is_grupo = 0 AND status = 'encerrado' AND encerrado_em IS NOT NULL
       AND julianday(encerrado_em) >= julianday(?) AND julianday(encerrado_em) <= julianday(?)
-  `).get(setorId, paraFormatoBanco(desde), agoraBanco).n;
+  `).get(setorId, desde, ate).n;
 
-  // Mensagens relevantes: só cliente e vendedor (humano). 'ia' (boas-vindas
-  // automática) e 'nota' (nota interna) não contam como resposta.
-  const ultimaRelevante = db.prepare(`
-    SELECT id, remetente FROM mensagens
-    WHERE lead_id = ? AND remetente IN ('cliente', 'vendedor') ORDER BY id DESC LIMIT 1
-  `);
-  const ultimaDoVendedorAntes = db.prepare(`
-    SELECT MAX(id) AS id FROM mensagens WHERE lead_id = ? AND remetente = 'vendedor' AND id < ?
-  `);
-  const primeiraDoClienteApos = db.prepare(`
-    SELECT criado_em FROM mensagens WHERE lead_id = ? AND remetente = 'cliente' AND id > ? ORDER BY id LIMIT 1
-  `);
-  const primeiraDoVendedorApos = db.prepare(`
-    SELECT criado_em FROM mensagens WHERE lead_id = ? AND remetente = 'vendedor' AND id > ? ORDER BY id LIMIT 1
-  `);
-
-  // Começo da sequência de mensagens do cliente ainda sem resposta humana
-  // que contém a mensagem `idMensagem` (pode ter começado em outro dia).
-  function inicioDaEspera(leadId, idMensagem) {
-    const anterior = ultimaDoVendedorAntes.get(leadId, idMensagem);
-    return lerDataBanco(primeiraDoClienteApos.get(leadId, anterior && anterior.id ? anterior.id : 0).criado_em);
-  }
-
-  // AGUARDANDO RESPOSTA: conversas abertas (não encerradas, não grupo) cuja
-  // última mensagem relevante é do cliente. A espera conta do começo dessa
-  // sequência até agora, só em minutos de expediente (horario.js).
-  const abertas = db.prepare(`
-    SELECT id FROM leads WHERE setor_id = ? AND status != 'encerrado' AND is_grupo = 0
-  `).all(setorId);
-  let aguardando = 0;
-  let maiorEspera = 0;
-  for (const lead of abertas) {
-    const ultima = ultimaRelevante.get(lead.id);
-    if (!ultima || ultima.remetente !== 'cliente') continue;
-    aguardando += 1;
-    maiorEspera = Math.max(maiorEspera, horario.minutosUteis(inicioDaEspera(lead.id, ultima.id), agora));
-  }
-
-  // PRIMEIRA RESPOSTA DE HOJE: para cada conversa (não grupo) em que o
-  // cliente escreveu hoje, mede da primeira mensagem dele no dia (ou do
-  // começo da espera, se ela vinha de antes) até a primeira mensagem humana
-  // depois dela, em minutos de expediente. Sem resposta ainda: sem_resposta.
-  // O id das mensagens cresce com o tempo: achar a última mensagem antes do
-  // corte evita ler a tabela inteira, que não tem índice por data.
-  const antesDoCorte = db.prepare('SELECT id FROM mensagens WHERE criado_em < ? ORDER BY id DESC LIMIT 1')
-    .get(paraFormatoBanco(inicioDia));
-  const primeirasDoDia = db.prepare(`
-    SELECT m.lead_id, MIN(m.id) AS id FROM mensagens m
-    JOIN leads l ON l.id = m.lead_id
-    WHERE m.id > ? AND m.remetente = 'cliente' AND l.setor_id = ? AND l.is_grupo = 0
+  // Conversas a analisar: as com resposta humana hoje e as abertas (esperas
+  // em andamento). O id das mensagens cresce com o tempo: partir da última
+  // mensagem antes do corte evita ler a tabela inteira (sem índice por data).
+  const antesDoCorte = db.prepare('SELECT id FROM mensagens WHERE criado_em < ? ORDER BY id DESC LIMIT 1').get(desde);
+  const respondidasHoje = db.prepare(`
+    SELECT DISTINCT m.lead_id AS id FROM mensagens m JOIN leads l ON l.id = m.lead_id
+    WHERE m.id > ? AND m.remetente = 'vendedor' AND l.setor_id = ? AND l.is_grupo = 0
       AND julianday(m.criado_em) >= julianday(?) AND julianday(m.criado_em) <= julianday(?)
-    GROUP BY m.lead_id
-  `).all(antesDoCorte ? antesDoCorte.id : 0, setorId, paraFormatoBanco(inicioDia), agoraBanco);
+  `).all(antesDoCorte ? antesDoCorte.id : 0, setorId, desde, ate);
+  const abertas = db.prepare(`
+    SELECT id FROM leads WHERE setor_id = ? AND is_grupo = 0 AND status != 'encerrado'
+  `).all(setorId);
+  const conversa = db.prepare('SELECT status, encerrado_em FROM leads WHERE id = ?');
+  // Só até "agora": o cálculo de um instante não usa mensagens posteriores.
+  const relevantes = db.prepare(`
+    SELECT remetente, criado_em FROM mensagens
+    WHERE lead_id = ? AND remetente IN ('cliente', 'vendedor') AND julianday(criado_em) <= julianday(?) ORDER BY id
+  `);
 
-  const tempos = [];
+  const primeiras = [];
+  const todas = [];
+  let semRespostaPrimeira = 0;
   let semResposta = 0;
-  for (const { lead_id: leadId, id } of primeirasDoDia) {
-    const resposta = primeiraDoVendedorApos.get(leadId, id);
-    const respondidaEm = resposta ? lerDataBanco(resposta.criado_em) : null;
-    if (!respondidaEm || respondidaEm > agora) {
-      semResposta += 1;
-      continue;
+  const ids = new Set([...respondidasHoje, ...abertas].map((l) => l.id));
+  for (const id of ids) {
+    const lead = conversa.get(id);
+    const { respondidas, aberta } = esperasDaConversa(relevantes.all(id, ate), lead.encerrado_em);
+    for (const e of respondidas) {
+      // Agrupadas pelo dia da resposta humana.
+      if (e.resposta < inicioDia || e.resposta > agora) continue;
+      const minutos = horario.minutosUteis(e.inicio, e.resposta);
+      todas.push(minutos);
+      if (e.primeira) primeiras.push(minutos);
     }
-    tempos.push(horario.minutosUteis(inicioDaEspera(leadId, id), respondidaEm));
+    // Sem resposta: esperas em andamento agora, em conversas abertas.
+    if (aberta && lead.status !== 'encerrado') {
+      semResposta += 1;
+      if (aberta.primeira) semRespostaPrimeira += 1;
+    }
   }
-  const media = tempos.length ? tempos.reduce((a, b) => a + b, 0) / tempos.length : null;
 
   return {
-    versao: 1,
+    versao: 2,
     setor: 'vendas',
     gerado_em: isoBrasilia(agora),
-    finalizadas: { hoje: contarEncerradas(inicioDia), mes: contarEncerradas(inicioMes) },
-    aguardando_resposta: { total: aguardando, espera_mais_antiga_min: arredondar1(maiorEspera) },
-    primeira_resposta_hoje: {
-      media_min: media === null ? null : arredondar1(media),
-      amostras: tempos.length,
-      sem_resposta: semResposta,
-    },
+    encerradas_hoje: encerradasHoje,
+    primeira_resposta: { media_min: media(primeiras), amostras: primeiras.length, sem_resposta: semRespostaPrimeira },
+    tempo_resposta: { media_min: media(todas), amostras: todas.length, sem_resposta: semResposta },
   };
 }
 
@@ -256,4 +267,4 @@ function criarRotaIndicadoresVendas({ db, env = process.env, agora = () => new D
   return router;
 }
 
-module.exports = { criarRotaIndicadoresVendas, calcularIndicadoresVendas, statusIndicadoresVendas, cortesBrasilia, isoBrasilia };
+module.exports = { criarRotaIndicadoresVendas, calcularIndicadoresVendas, statusIndicadoresVendas, esperasDaConversa, inicioDoDiaBrasilia, isoBrasilia };

@@ -4,25 +4,31 @@ Rota somente leitura que entrega ao Scob 3D Operations os números agregados do
 atendimento de Vendas. Código em `indicadores-vendas.js`, testes em
 `test/indicadores-vendas.test.js` (`npm test`, só dados fictícios).
 
-## Contrato HTTP (v1)
+## Contrato HTTP (v2)
 
 ```
 GET /api/externo/indicadores-vendas
 Authorization: Bearer <INDICADORES_VENDAS_TOKEN>
 ```
 
-Resposta `200` (`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`):
+Resposta `200` (`Cache-Control: no-store`, `X-Content-Type-Options: nosniff`),
+exatamente três indicadores do dia de Brasília:
 
 ```json
 {
-  "versao": 1,
+  "versao": 2,
   "setor": "vendas",
   "gerado_em": "2026-11-03T15:00:00-03:00",
-  "finalizadas": { "hoje": 1, "mes": 2 },
-  "aguardando_resposta": { "total": 2, "espera_mais_antiga_min": 120 },
-  "primeira_resposta_hoje": { "media_min": 17.3, "amostras": 3, "sem_resposta": 1 }
+  "encerradas_hoje": 12,
+  "primeira_resposta": { "media_min": 15, "amostras": 9, "sem_resposta": 2 },
+  "tempo_resposta": { "media_min": 8.8, "amostras": 41, "sem_resposta": 3 }
 }
 ```
+
+- `media_min`: média em minutos de expediente, 1 casa decimal; **`null` sem
+  amostras** (nunca 0 por falta de dados).
+- `amostras`: esperas respondidas hoje usadas na média.
+- `sem_resposta`: esperas em andamento agora (fora da média).
 
 | Situação | Status | Corpo |
 | --- | --- | --- |
@@ -49,26 +55,34 @@ Parâmetros de URL são ignorados: não existe seleção de setor nem de instala
 ## Fórmulas
 
 Todas as contagens excluem grupos (`is_grupo = 1`) e usam só o setor Vendas.
-"Hoje" e "mês" são o dia e o mês de **Brasília** (UTC−3 fixo, igual ao
-`horario.js`); o banco guarda UTC.
+"Hoje" é o dia de **Brasília** (UTC−3 fixo, igual ao `horario.js`), da 00:00
+até agora; o banco guarda UTC. Mensagens posteriores a "agora" são ignoradas.
 
-**Finalizadas hoje / no mês** — conversas com `status = 'encerrado'` cujo
-`encerrado_em` está entre o início do dia (ou do mês) de Brasília e agora.
+**Mensagens consideradas** — só `cliente` e `vendedor` (humano: painel,
+resposta manual pelo celular, encaminhamento, figurinha). `ia` (automática) e
+`nota` (interna) são ignoradas: não abrem nem respondem espera.
 
-**Aguardando resposta** — conversas não encerradas cuja última mensagem
-relevante (`cliente` ou `vendedor`) é do cliente. `ia` (boas-vindas
-automática) e `nota` (nota interna) são ignoradas. `espera_mais_antiga_min`:
-maior espera atual, contada da primeira mensagem do cliente ainda sem resposta
-humana até agora, em minutos de expediente.
+**Espera** — começa na primeira mensagem do cliente depois da última resposta
+humana (ou do início do ciclo); mensagens seguintes do cliente não reiniciam o
+relógio. Termina na próxima mensagem `vendedor`. Duração em minutos de
+expediente (`horario.minutosUteis`): noite, domingo e sábado à tarde não contam.
 
-**Primeira resposta de hoje** — para cada conversa em que o cliente escreveu
-hoje: do começo da espera que contém a primeira mensagem do cliente no dia
-(pode ter começado em dia anterior) até a primeira mensagem `vendedor` depois
-dela, em minutos de expediente (`horario.minutosUteis`). Mensagens da IA não
-contam como resposta.
-- `media_min`: média dessas esperas (1 casa decimal); `null` sem amostras.
-- `amostras`: conversas respondidas.
-- `sem_resposta`: conversas em que o cliente escreveu hoje e ninguém respondeu ainda.
+**Ciclo de atendimento** — começa na criação da conversa ou na primeira
+mensagem depois do último encerramento registrado (`encerrado_em`), quando a
+conversa foi reaberta. Uma espera em aberto no encerramento termina sem
+resposta e não passa para o ciclo seguinte.
+
+1. **`encerradas_hoje`** — conversas com `status = 'encerrado'` e
+   `encerrado_em` no dia de Brasília.
+2. **`primeira_resposta`** — média das **primeiras esperas respondidas** de
+   cada ciclo cuja resposta humana ocorreu hoje.
+3. **`tempo_resposta`** — média de **todas** as esperas respondidas (incluindo
+   a primeira) cuja resposta humana ocorreu hoje.
+
+**Sem resposta** — esperas em andamento agora, em conversas abertas (não
+encerradas): `tempo_resposta.sem_resposta` conta todas;
+`primeira_resposta.sem_resposta` só as que são a primeira do ciclo. Ficam fora
+das médias. Conversa encerrada com espera pendente não conta.
 
 ## Conversas reabertas
 
@@ -76,13 +90,15 @@ O sistema reabre a conversa no mesmo lead (cliente volta a escrever, vendedor
 escreve ou usa "reabrir"); não há histórico de eventos.
 
 - Ao reabrir, `encerrado_em` fica com o valor antigo, mas o status sai de
-  `encerrado`: a conversa **deixa de contar** como finalizada até ser
+  `encerrado`: a conversa **deixa de contar** como encerrada hoje até ser
   encerrada de novo.
 - Ao encerrar de novo, `encerrado_em` é sobrescrito: a conversa conta **uma
-  vez**, na data do último encerramento. Encerramentos anteriores no mesmo mês
-  não são somados (subcontagem possível).
-- Na primeira resposta, a mensagem do cliente que reabre a conversa conta como
-  a primeira do dia, como qualquer outra.
+  vez**, pelo último encerramento.
+- A primeira mensagem depois do último encerramento abre um novo ciclo: a
+  primeira espera respondida dele volta a ser "primeira resposta".
+  Reaberturas anteriores ao último encerramento não são distinguidas
+  (limitação aceita, sem mudança de esquema): numa conversa encerrada e
+  reaberta várias vezes, esperas de ciclos antigos contam como seguintes.
 
 ## Horário comercial: divergências encontradas
 
@@ -100,8 +116,10 @@ Consequências:
   no Relatório de Uso.
 - O Relatório de Uso tende a mostrar tempos muito menores, porque a boas-vindas
   automática conta como resposta.
-- Esta rota mede só a primeira resposta humana **do dia** por conversa, então
-  não deve bater com nenhum dos dois.
+- `tempo_resposta` desta rota segue a mesma ideia do Histórico (cada espera
+  até a resposta humana), mas agrupa pelo dia de Brasília da resposta, não
+  pelas últimas 48 h; `primeira_resposta` só considera a primeira espera
+  respondida de cada ciclo. Os números não devem bater com o Relatório de Uso.
 - **Decisão pendente:** confirmar o expediente oficial (incluindo sábado e
   feriados) antes de consolidar a fórmula.
 
